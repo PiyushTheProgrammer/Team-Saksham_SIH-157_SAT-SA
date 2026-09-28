@@ -25,3 +25,5 @@ synthetic_soc_data.csv
 
 # Documents
 *.docx
+# Datasets
+Sample Datasets/

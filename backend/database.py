@@ -146,12 +146,77 @@ def init_db() -> None:
                         SELECT 1 FROM information_schema.columns 
                         WHERE table_name='asset_inventory' AND column_name='asset_name'
                     ) THEN
-                        DROP TABLE asset_inventory;
+                        DROP TABLE asset_inventory CASCADE;
                     END IF;
                 END $$;
             """))
         except Exception:
             pass
 
+        # Ensure asset_inventory table is created before FK constraints
+        try:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS asset_inventory (
+                    asset_name VARCHAR(128) PRIMARY KEY,
+                    asset_type VARCHAR(64),
+                    department VARCHAR(128),
+                    asset_criticality VARCHAR(32)
+                );
+            """))
+        except Exception:
+            pass
+
+        # Ensure unique constraint on soc_alerts.alert_id for child foreign keys
+        try:
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'soc_alerts') THEN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint 
+                            WHERE conname = 'uq_soc_alerts_alert_id'
+                        ) THEN
+                            -- Remove duplicate or null alert_ids if any before adding constraint
+                            DELETE FROM soc_alerts a USING soc_alerts b
+                            WHERE a.id < b.id AND a.alert_id = b.alert_id;
+                            
+                            ALTER TABLE soc_alerts ADD CONSTRAINT uq_soc_alerts_alert_id UNIQUE (alert_id);
+                        END IF;
+                    END IF;
+                END $$;
+            """))
+        except Exception as e:
+            logger.debug("Constraint uq_soc_alerts_alert_id check: %s", e)
+
+        # Ensure explicit foreign key constraint from soc_alerts.asset_name to asset_inventory.asset_name
+        try:
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'soc_alerts') 
+                       AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'asset_inventory') THEN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint 
+                            WHERE conname = 'fk_soc_alerts_asset_name'
+                        ) THEN
+                            -- Insert any missing asset_name into asset_inventory before adding constraint
+                            INSERT INTO asset_inventory (asset_name, asset_type, department, asset_criticality)
+                            SELECT DISTINCT asset_name, 'Server', 'IT', 'MEDIUM'
+                            FROM soc_alerts
+                            WHERE asset_name IS NOT NULL
+                              AND asset_name NOT IN (SELECT asset_name FROM asset_inventory)
+                            ON CONFLICT DO NOTHING;
+
+                            ALTER TABLE soc_alerts 
+                            ADD CONSTRAINT fk_soc_alerts_asset_name 
+                            FOREIGN KEY (asset_name) REFERENCES asset_inventory(asset_name) ON DELETE SET NULL;
+                        END IF;
+                    END IF;
+                END $$;
+            """))
+        except Exception as e:
+            logger.debug("Constraint fk_soc_alerts_asset_name check: %s", e)
+
     Base.metadata.create_all(bind=engine)
+    logger.info("Database schema initialized successfully with all 6 normalized relational tables.")
 

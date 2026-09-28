@@ -136,15 +136,24 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in df.columns]
 
     # 2. Rename Columns: time_to_close_seconds -> time_to_close
-    if "time_to_close_seconds" in df.columns and "time_to_close" not in df.columns:
-        df["time_to_close"] = df["time_to_close_seconds"]
-    elif "close_time" in df.columns and "time_to_close" not in df.columns:
-        df["time_to_close"] = df["close_time"]
-    elif "ttc" in df.columns and "time_to_close" not in df.columns:
-        df["time_to_close"] = df["ttc"]
-    elif "time_to_close" not in df.columns:
-        df["time_to_close"] = 0
-    df["time_to_close"] = pd.to_numeric(df["time_to_close"], errors="coerce").fillna(0).astype(int)
+    has_ttc_col = False
+    for col in ["time_to_close_seconds", "time_to_close", "close_time", "ttc"]:
+        if col in df.columns:
+            has_ttc_col = True
+            if col != "time_to_close":
+                df["time_to_close"] = df[col]
+            break
+
+    if has_ttc_col:
+        numeric_ttc = pd.to_numeric(df["time_to_close"], errors="coerce")
+        has_valid_ttc = bool(numeric_ttc.notna().any())
+        df["time_to_close"] = numeric_ttc.fillna(-1).astype(int)
+        df["_has_time_to_close"] = has_valid_ttc
+        df.attrs["has_time_to_close"] = has_valid_ttc
+    else:
+        df["time_to_close"] = -1
+        df["_has_time_to_close"] = False
+        df.attrs["has_time_to_close"] = False
 
     # 3. Missing Columns: time_to_acknowledge fallback (fill with 0)
     if "time_to_acknowledge" not in df.columns:
@@ -207,15 +216,23 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df["dest_asset"] = df["dest_asset"].fillna("Unknown Asset").astype(str)
 
     # 8. Standardize resolution_notes / notes / resolution
-    if "resolution_notes" not in df.columns:
-        if "notes" in df.columns:
-            df["resolution_notes"] = df["notes"].fillna("").astype(str)
-        elif "resolution" in df.columns:
-            df["resolution_notes"] = df["resolution"].fillna("").astype(str)
-        else:
-            df["resolution_notes"] = ""
-    else:
+    has_notes_col = False
+    for col in ["resolution_notes", "notes", "resolution"]:
+        if col in df.columns:
+            has_notes_col = True
+            if col != "resolution_notes":
+                df["resolution_notes"] = df[col]
+            break
+
+    if has_notes_col:
         df["resolution_notes"] = df["resolution_notes"].fillna("").astype(str)
+        has_valid_notes = bool(df["resolution_notes"].str.strip().ne("").any())
+        df["_has_resolution_notes"] = has_valid_notes
+        df.attrs["has_resolution_notes"] = has_valid_notes
+    else:
+        df["resolution_notes"] = ""
+        df["_has_resolution_notes"] = False
+        df.attrs["has_resolution_notes"] = False
 
     # 9. Standardize timestamp / time / date
     if "timestamp" not in df.columns:
@@ -343,6 +360,13 @@ class SpeedAnomalyDetector:
         # Robust feature extraction and column normalization
         df = _preprocess_alerts_df(df)
 
+        has_ttc = getattr(df, "attrs", {}).get("has_time_to_close", None)
+        if has_ttc is None:
+            has_ttc = bool(df["_has_time_to_close"].any()) if "_has_time_to_close" in df.columns else False
+        if not has_ttc:
+            # Gracefully disable detector when required time_to_close column is missing
+            return []
+
         features = df[["severity_num", "time_to_close", "time_to_acknowledge", "escalated_num"]].values
 
         if len(features) == 0:
@@ -362,6 +386,8 @@ class SpeedAnomalyDetector:
         for _, row in df.iterrows():
             sev = str(row["alert_severity"]).upper()
             ttc = int(row["time_to_close"])
+            if ttc < 0:
+                continue
             threshold = SEVERITY_SPEED_THRESHOLDS.get(sev, 15)
 
             # Rule-based gate: must be CRITICAL/HIGH AND below time threshold
@@ -425,6 +451,13 @@ class RepetitiveNotesDetector:
             return []
 
         df = _preprocess_alerts_df(df)
+        has_notes = getattr(df, "attrs", {}).get("has_resolution_notes", None)
+        if has_notes is None:
+            has_notes = bool(df["_has_resolution_notes"].any()) if "_has_resolution_notes" in df.columns else False
+        if not has_notes or df["resolution_notes"].str.strip().eq("").all():
+            # Gracefully disable detector when required resolution_notes column is missing
+            return []
+
         flagged: list[RepetitiveNoteCluster] = []
 
         for analyst, group in df.groupby("assigned_analyst"):
@@ -775,6 +808,20 @@ class AnalyticsOrchestrator:
         ]
         report.trend = trend_data
 
+        has_ttc = getattr(self.alerts_df, "attrs", {}).get("has_time_to_close", None)
+        if has_ttc is None:
+            has_ttc = bool(self.alerts_df["_has_time_to_close"].any()) if "_has_time_to_close" in self.alerts_df.columns else False
+
+        has_notes = getattr(self.alerts_df, "attrs", {}).get("has_resolution_notes", None)
+        if has_notes is None:
+            has_notes = bool(self.alerts_df["_has_resolution_notes"].any()) if "_has_resolution_notes" in self.alerts_df.columns else False
+
+        disabled_flags: list[str] = []
+        if not has_ttc:
+            disabled_flags.append("speed_anomalies: missing required column 'time_to_close_seconds'")
+        if not has_notes:
+            disabled_flags.append("repetitive_notes: missing required column 'resolution_notes'")
+
         report.summary = {
             "total_alerts": total,
             "total_flagged_anomalies": total_flagged,
@@ -785,6 +832,12 @@ class AnalyticsOrchestrator:
             "overall_risk_score": risk_score,
             "entity_risk": entity_risk,
             "trend": trend_data,
+            "ml_capabilities": {
+                "speed_anomaly_detection": bool(has_ttc),
+                "repetitive_notes_detection": bool(has_notes),
+                "blind_spot_detection": not self.inventory_df.empty,
+            },
+            "disabled_flags": disabled_flags,
         }
 
         print(f"\n[Engine] [OK] Analysis complete. Risk score: {risk_score}/100")

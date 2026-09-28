@@ -1,0 +1,113 @@
+alert_id,entity_id,asset_name,alert_category,alert_severity,time_to_close_seconds,escalated,resolution_notes
+AL-1001,ENT-A,web-server-01,Malware,Medium,3600,True,Analyzed payload in sandbox. Quarantined file and wiped directory.
+AL-1002,ENT-A,db-prod-02,Unauthorized Access,Critical,4,False,Checked logs. All good.
+AL-1003,ENT-B,fw-edge-01,DDoS,High,4500,True,Applied rate limiting to source IPs. Traffic normalized.
+AL-1004,ENT-A,user-workstation-44,Phishing,Low,12,False,Checked logs. All good.
+AL-1005,ENT-C,auth-server-01,Brute Force,Critical,14,False,Checked logs. All good.
+AL-1006,ENT-C,auth-server-02,Brute Force,Critical,7200,True,Investigated failed logins. Reset user credentials and blocked IP block.
+AL-1007,ENT-B,payment-gateway,Data Exfiltration,High,9,False,Resolved.
+AL-1008,ENT-A,web-server-01,Malware,Medium,4100,True,Identified adware strain. Removed and ran full system scan.
+AL-1009,ENT-D,vpn-concentrator,Anomalous Login,Medium,8,False,Checked logs. All good.
+AL-1010,ENT-D,vpn-concentrator,Anomalous Login,High,8500,True,User logged in from new geolocation. Confirmed travel with HR.
+AL-1011,ENT-B,internal-wiki,Unauthorized Access,Low,18,False,Resolved.
+AL-1012,ENT-A,db-prod-02,SQL Injection,Critical,5,False,Checked logs. All good.
+AL-1013,ENT-A,user-workstation-12,Phishing,Low,3600,False,User forwarded to abuse inbox. Confirmed malicious and deleted.
+AL-1014,ENT-B,fw-edge-01,Port Scan,Low,5,False,Resolved.
+AL-1015,ENT-A,db-prod-02,Unauthorized Access,Critical,8,False,Checked logs. All good.
+AL-1016,ENT-C,auth-server-01,Brute Force,Medium,4500,False,IP blocked at firewall.
+AL-1017,ENT-D,vpn-concentrator,Anomalous Login,High,7200,True,Verified with user. Legitimate travel to new region.
+AL-1018,ENT-A,user-workstation-15,Malware,High,14,False,Checked logs. All good.
+AL-1019,ENT-B,payment-gateway,Data Exfiltration,Critical,9000,True,Blocked outbound transfer. Incident response team engaged.
+AL-1020,ENT-C,user-workstation-03,Phishing,Low,1200,False,False positive. Marketing email.
+AL-1021,ENT-D,web-server-02,DDoS,Medium,5400,False,Rate limiting applied automatically. Monitored for 1 hour.
+AL-1022,ENT-A,db-prod-02,SQL Injection,Critical,6,False,Checked logs. All good.
+AL-1023,ENT-B,internal-wiki,Unauthorized Access,Low,18,False,Resolved.
+AL-1024,ENT-C,auth-server-02,Brute Force,Medium,3600,False,Account locked out as per policy.
+AL-1025,ENT-D,user-workstation-22,Malware,High,8500,True,Quarantined machine. Reimaging initiated.
+AL-1026,ENT-A,user-workstation-45,Phishing,Low,4,False,Checked logs. All good.
+AL-1027,ENT-B,fw-edge-01,Port Scan,Low,8,False,Resolved.
+AL-1028,ENT-C,auth-server-01,Brute Force,Medium,4100,False,IP blocked at firewall.
+AL-1029,ENT-D,vpn-concentrator,Anomalous Login,Medium,6000,False,User mistyped password multiple times.
+AL-1030,ENT-A,web-server-01,Malware,High,7,False,Checked logs. All good.
+AL-1031,ENT-B,payment-gateway,Unauthorized Access,Critical,12,False,Resolved.
+AL-1032,ENT-C,db-analytics-01,Data Exfiltration,High,9200,True,DBA confirmed legitimate bulk export for reporting.
+AL-1033,ENT-D,user-workstation-18,Phishing,Low,1500,False,Deleted email from user inbox.
+AL-1034,ENT-A,user-workstation-09,Malware,Medium,11,False,Checked logs. All good.
+AL-1035,ENT-B,fw-edge-01,DDoS,High,15,False,Resolved.
+AL-1036,ENT-C,auth-server-02,Brute Force,Critical,10500,True,Coordinated attack detected. Blocked entire subnet.
+AL-1037,ENT-D,web-server-02,SQL Injection,High,7800,True,WAF blocked payload. Tuned WAF rules.
+AL-1038,ENT-A,db-prod-02,Unauthorized Access,Critical,5,False,Checked logs. All good.
+AL-1039,ENT-B,internal-wiki,Unauthorized Access,Low,22,False,Resolved.
+AL-1040,ENT-C,user-workstation-31,Phishing,Low,1300,False,User education provided.
+AL-1041,ENT-D,vpn-concentrator,Anomalous Login,Medium,4800,False,Verified legitimate access via mobile device.
+AL-1042,ENT-A,user-workstation-27,Malware,High,9,False,Checked logs. All good.
+AL-1043,ENT-B,payment-gateway,Data Exfiltration,Critical,8,False,Resolved.
+AL-1044,ENT-C,auth-server-01,Brute Force,Medium,3800,False,IP blocked.
+AL-1045,ENT-D,user-workstation-11,Phishing,Low,1600,False,Spam email. No payload.
+AL-1046,ENT-A,web-server-01,DDoS,High,14,False,Checked logs. All good.
+AL-1047,ENT-B,fw-edge-01,Port Scan,Low,6,False,Resolved.
+AL-1048,ENT-C,db-analytics-01,Unauthorized Access,Medium,6200,False,Developer used wrong credentials.
+AL-1049,ENT-D,web-server-02,Malware,High,8800,True,Isolated web node. Restored from clean backup.
+AL-1050,ENT-A,db-prod-02,SQL Injection,Critical,7,False,Checked logs. All good.
+AL-1051,ENT-B,internal-wiki,Unauthorized Access,Low,19,False,Resolved.
+AL-1052,ENT-C,auth-server-02,Brute Force,Medium,4300,False,Account locked.
+AL-1053,ENT-D,vpn-concentrator,Anomalous Login,High,8,False,Checked logs. All good.
+AL-1054,ENT-A,user-workstation-33,Phishing,Low,11,False,Checked logs. All good.
+AL-1055,ENT-B,payment-gateway,Unauthorized Access,Critical,14,False,Resolved.
+AL-1056,ENT-C,user-workstation-05,Malware,Medium,3200,False,AV quarantined adware successfully.
+AL-1057,ENT-D,user-workstation-44,Phishing,Low,1400,False,Marketing spam.
+AL-1058,ENT-A,web-server-01,Malware,High,5,False,Checked logs. All good.
+AL-1059,ENT-B,fw-edge-01,DDoS,Medium,21,False,Resolved.
+AL-1060,ENT-C,auth-server-01,Brute Force,Critical,12000,True,Escalated to SOC Tier 3. Implemented geoblocking.
+AL-1061,ENT-D,web-server-02,SQL Injection,High,7500,True,Analyzed payload. WAF signature updated.
+AL-1062,ENT-A,db-prod-02,Data Exfiltration,Critical,4,False,Checked logs. All good.
+AL-1063,ENT-B,internal-wiki,Unauthorized Access,Low,17,False,Resolved.
+AL-1064,ENT-C,db-analytics-01,Unauthorized Access,High,8100,True,Revoked stale access keys for former employee.
+AL-1065,ENT-D,vpn-concentrator,Anomalous Login,Medium,5500,False,User connected from new home ISP.
+AL-1066,ENT-A,user-workstation-19,Malware,Medium,13,False,Checked logs. All good.
+AL-1067,ENT-B,payment-gateway,Data Exfiltration,Critical,10,False,Resolved.
+AL-1068,ENT-C,auth-server-02,Brute Force,Medium,3900,False,IP blocked.
+AL-1069,ENT-D,user-workstation-02,Phishing,Low,1800,False,False positive.
+AL-1070,ENT-A,web-server-01,DDoS,Critical,6,False,Checked logs. All good.
+AL-1071,ENT-B,fw-edge-01,Port Scan,Low,7,False,Resolved.
+AL-1072,ENT-C,user-workstation-14,Malware,High,9400,True,Ransomware precursor detected. Host isolated from network.
+AL-1073,ENT-D,web-server-02,Malware,Medium,4800,False,Cleaned temporary directories.
+AL-1074,ENT-A,db-prod-02,SQL Injection,Critical,9,False,Checked logs. All good.
+AL-1075,ENT-B,internal-wiki,Unauthorized Access,Low,15,False,Resolved.
+AL-1076,ENT-C,auth-server-01,Brute Force,Medium,4200,False,Account locked.
+AL-1077,ENT-D,vpn-concentrator,Anomalous Login,High,8900,True,Compromised credential suspected. Forced global password reset.
+AL-1078,ENT-A,user-workstation-50,Phishing,Low,8,False,Checked logs. All good.
+AL-1079,ENT-B,payment-gateway,Unauthorized Access,Critical,11,False,Resolved.
+AL-1080,ENT-C,db-analytics-01,Data Exfiltration,High,7,False,Resolved.
+AL-1081,ENT-D,user-workstation-29,Phishing,Low,1250,False,Spam deleted.
+AL-1082,ENT-A,web-server-01,Malware,High,12,False,Checked logs. All good.
+AL-1083,ENT-B,fw-edge-01,DDoS,High,16,False,Resolved.
+AL-1084,ENT-C,auth-server-02,Brute Force,Critical,11000,True,Blocked attack infrastructure IPs.
+AL-1085,ENT-D,web-server-02,SQL Injection,Medium,6300,False,Blocked by WAF.
+AL-1086,ENT-A,db-prod-02,Unauthorized Access,Critical,5,False,Checked logs. All good.
+AL-1087,ENT-B,internal-wiki,Unauthorized Access,Low,14,False,Resolved.
+AL-1088,ENT-C,user-workstation-41,Malware,Medium,3700,False,AV handled threat.
+AL-1089,ENT-D,vpn-concentrator,Anomalous Login,Medium,5200,False,Confirmed user travel.
+AL-1090,ENT-A,user-workstation-07,Phishing,Low,10,False,Checked logs. All good.
+AL-1091,ENT-B,payment-gateway,Data Exfiltration,Critical,9,False,Resolved.
+AL-1092,ENT-C,auth-server-01,Brute Force,Medium,4000,False,IP blocked.
+AL-1093,ENT-D,user-workstation-38,Phishing,Low,1700,False,False positive.
+AL-1094,ENT-A,web-server-01,DDoS,High,6,False,Checked logs. All good.
+AL-1095,ENT-B,fw-edge-01,Port Scan,Low,5,False,Resolved.
+AL-1096,ENT-C,db-analytics-01,Unauthorized Access,Medium,5900,False,Service account misconfiguration fixed.
+AL-1097,ENT-D,web-server-02,Malware,High,8600,True,Vulnerability patched and server rebooted.
+AL-1098,ENT-A,db-prod-02,SQL Injection,Critical,8,False,Checked logs. All good.
+AL-1099,ENT-B,internal-wiki,Unauthorized Access,Low,20,False,Resolved.
+AL-1100,ENT-C,auth-server-02,Brute Force,Medium,4600,False,Account locked.
+AL-1101,ENT-D,vpn-concentrator,Anomalous Login,High,7,False,Checked logs. All good.
+AL-1102,ENT-A,user-workstation-24,Phishing,Low,12,False,Checked logs. All good.
+AL-1103,ENT-B,payment-gateway,Unauthorized Access,Critical,13,False,Resolved.
+AL-1104,ENT-C,user-workstation-10,Malware,High,9100,True,Endpoint isolated for forensic image capture.
+AL-1105,ENT-D,user-workstation-47,Phishing,Low,1350,False,Spam email.
+AL-1106,ENT-A,web-server-01,Malware,Medium,9,False,Checked logs. All good.
+AL-1107,ENT-B,fw-edge-01,DDoS,Medium,18,False,Resolved.
+AL-1108,ENT-C,auth-server-01,Brute Force,Critical,13000,True,Engaged ISP to null-route attacking IPs.
+AL-1109,ENT-D,web-server-02,SQL Injection,High,7700,True,WAF policy updated to block new evasion technique.
+AL-1110,ENT-A,db-prod-02,Data Exfiltration,Critical,5,False,Checked logs. All good.
+AL-1111,ENT-B,internal-wiki,Unauthorized Access,Low,16,False,Resolved.
+AL-1112,ENT-C,db-analytics-01,Unauthorized Access,High,8,False,Resolved.

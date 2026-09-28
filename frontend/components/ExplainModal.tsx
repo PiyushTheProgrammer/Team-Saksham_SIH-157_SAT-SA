@@ -11,10 +11,28 @@ interface Props {
   onClose: () => void;
 }
 
+interface RecommendedReference {
+  match_found: boolean;
+  similarity_score: number;
+  similarity_ratio: number;
+  matched_ticket_id: string;
+  matched_entity_id: string;
+  matched_asset_name: string;
+  matched_category: string;
+  matched_severity: string;
+  historical_notes: string;
+  historical_capa: string;
+  closure_reason: string;
+  closed_by: string;
+  notification_message: string;
+  is_cross_cse: boolean;
+}
+
 interface ExplainResponse {
   explanation: string;
   source: "ollama" | "rule_engine";
   model: string | null;
+  recommended_reference?: RecommendedReference | null;
 }
 
 function Spinner() {
@@ -88,6 +106,8 @@ export default function ExplainModal({ anomalyType, rowData, onClose }: Props) {
   const [status, setStatus] = useState<"loading" | "done" | "error">("loading");
   const [response, setResponse] = useState<ExplainResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const [showCapaDetails, setShowCapaDetails] = useState<boolean>(true);
+  const [copiedCapa, setCopiedCapa] = useState<boolean>(false);
 
   // Close on Escape
   useEffect(() => {
@@ -346,6 +366,200 @@ export default function ExplainModal({ anomalyType, rowData, onClose }: Props) {
                   All inference runs locally. No data left this machine.
                 </span>
               </div>
+
+              {/* ── Cross-CSE Similar Ticket Audit Reference Notification ── */}
+              {response.recommended_reference && response.recommended_reference.match_found && (
+                <div
+                  style={{
+                    marginTop: 18,
+                    padding: "16px 18px",
+                    background: "linear-gradient(135deg, rgba(30, 58, 138, 0.08) 0%, rgba(59, 130, 246, 0.12) 100%)",
+                    border: "1px solid rgba(59, 130, 246, 0.35)",
+                    borderRadius: 10,
+                    boxShadow: "0 2px 10px rgba(59, 130, 246, 0.06)",
+                  }}
+                >
+                  {/* Notification Header */}
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                    <div
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        background: "#2563eb",
+                        color: "#ffffff",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        marginTop: 2,
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                        <path d="m9 12 2 2 4-4" />
+                      </svg>
+                    </div>
+
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: "#1e3a8a" }}>
+                          Cross-CSE Audit Reference Available
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 700,
+                            padding: "2px 8px",
+                            borderRadius: 999,
+                            background: "#dcfce7",
+                            color: "#15803d",
+                            border: "1px solid #bbf7d0",
+                          }}
+                        >
+                          {response.recommended_reference.similarity_score}% NLP Match
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            padding: "2px 8px",
+                            borderRadius: 4,
+                            background: "#eff6ff",
+                            color: "#1d4ed8",
+                            border: "1px solid #dbeafe",
+                          }}
+                        >
+                          {response.recommended_reference.matched_entity_id}
+                        </span>
+                      </div>
+
+                      {/* Exact prompt requirement */}
+                      <p style={{ margin: "4px 0 10px", fontSize: 13, color: "#1e293b", lineHeight: 1.5, fontWeight: 500 }}>
+                        You have audited a similar anomaly from another CSE before. Do you want to review that historical Corrective Action (CAPA) as a reference?
+                      </p>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => setShowCapaDetails(!showCapaDetails)}
+                          style={{
+                            fontSize: 12,
+                            padding: "6px 14px",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            background: "#2563eb",
+                            color: "#ffffff",
+                            borderRadius: 6,
+                            fontWeight: 600,
+                            border: "none",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+                          </svg>
+                          {showCapaDetails ? "Hide Historical CAPA" : "Review Historical CAPA"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expandable Historical CAPA Reference Card */}
+                  {showCapaDetails && (
+                    <div
+                      style={{
+                        marginTop: 14,
+                        padding: 14,
+                        background: "#ffffff",
+                        borderRadius: 8,
+                        border: "1px solid #bfdbfe",
+                        boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+                      }}
+                    >
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 }}>
+                        <div style={{ fontSize: 11 }}>
+                          <span style={{ color: "var(--text-muted)", display: "block" }}>Historical Ticket ID</span>
+                          <code style={{ fontSize: 12, fontWeight: 700, color: "#1e40af" }}>
+                            {response.recommended_reference.matched_ticket_id}
+                          </code>
+                        </div>
+                        <div style={{ fontSize: 11 }}>
+                          <span style={{ color: "var(--text-muted)", display: "block" }}>Source Entity (CSE)</span>
+                          <strong style={{ fontSize: 12, color: "#0f172a" }}>
+                            {response.recommended_reference.matched_entity_id}
+                          </strong>
+                        </div>
+                        <div style={{ fontSize: 11 }}>
+                          <span style={{ color: "var(--text-muted)", display: "block" }}>Category &amp; Severity</span>
+                          <strong style={{ fontSize: 12, color: "#0f172a" }}>
+                            {response.recommended_reference.matched_category} ({response.recommended_reference.matched_severity})
+                          </strong>
+                        </div>
+                        <div style={{ fontSize: 11 }}>
+                          <span style={{ color: "var(--text-muted)", display: "block" }}>Audited By</span>
+                          <span style={{ fontSize: 12, color: "#475569" }}>
+                            {response.recommended_reference.closed_by}
+                          </span>
+                        </div>
+                      </div>
+
+                      {response.recommended_reference.historical_notes && (
+                        <div style={{ marginBottom: 10 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            Historical Resolution Notes
+                          </span>
+                          <div style={{ fontSize: 12, fontStyle: "italic", color: "#334155", background: "#f8fafc", padding: "6px 10px", borderRadius: 4, marginTop: 3 }}>
+                            &ldquo;{response.recommended_reference.historical_notes}&rdquo;
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "#1e3a8a", textTransform: "uppercase", letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 4 }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2563eb" strokeWidth="2">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                          </svg>
+                          Historical Corrective Action (CAPA) Precedent
+                        </span>
+                        <div
+                          style={{
+                            marginTop: 4,
+                            padding: "10px 14px",
+                            background: "#f0fdf4",
+                            borderLeft: "3px solid #16a34a",
+                            borderRadius: 6,
+                            fontSize: 13,
+                            color: "#14532d",
+                            lineHeight: 1.6,
+                            fontWeight: 500,
+                          }}
+                        >
+                          {response.recommended_reference.historical_capa}
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(response.recommended_reference?.historical_capa || "");
+                            setCopiedCapa(true);
+                            setTimeout(() => setCopiedCapa(false), 2000);
+                          }}
+                          style={{ fontSize: 11, padding: "4px 10px" }}
+                        >
+                          {copiedCapa ? "✓ Copied to Clipboard" : "Copy CAPA Precedent"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

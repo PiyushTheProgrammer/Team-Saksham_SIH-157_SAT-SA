@@ -171,7 +171,13 @@ def calculate_priority(row: pd.Series, criticality: str = "", signals: set[str] 
         "priority_classification": priority,
         "severity": severity,
         "asset": str(
-            row.get("dest_asset", row.get("asset_id", "Unknown"))
+            row.get("dest_asset")
+            if str(row.get("dest_asset", "")).strip().lower() not in {"unknown asset", "unknown", "nan", "none", ""}
+            else (
+                row.get("asset_name")
+                if str(row.get("asset_name", "")).strip().lower() not in {"", "nan", "none"}
+                else row.get("asset_id", "Unknown")
+            )
         ),
         "alert_type": str(row.get("alert_type", "Unknown")),
         "analyst": str(

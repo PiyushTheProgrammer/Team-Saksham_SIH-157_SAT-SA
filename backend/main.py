@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 import aiofiles
 import pandas as pd
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -43,8 +43,13 @@ from priority_engine import generate_priority_queue
 from report_generator import build_report, render_report
 
 # ── Database (PostgreSQL via SQLAlchemy — air-gap safe) ──────────────────────
-from database import get_db, init_db
-from models import SOCAlert, SocAlertRecord, AssetInventory
+from database import get_db, init_db, engine
+from models import (
+    AssetInventory, SocAlerts, SOCAlert, SocAlertRecord,
+    CaseManagement, InvestigationWorkflows, EscalationRecords, AlertClosures
+)
+from recommendation_engine import recommendation_engine
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 # ── LangChain (local only — no cloud imports) ──
@@ -90,6 +95,57 @@ _inventory_cache: pd.DataFrame | None = None
 _cache_lock = asyncio.Lock()
 
 
+def _empty_summary() -> dict[str, Any]:
+    return {
+        "total_alerts": 0,
+        "total_flagged_anomalies": 0,
+        "speed_anomalies_count": 0,
+        "repetitive_notes_clusters": 0,
+        "repetitive_notes_tickets": 0,
+        "blind_spots_count": 0,
+        "overall_risk_score": 0.0,
+        "entity_risk": [],
+        "trend": [],
+        "ml_capabilities": {
+            "speed_anomaly_detection": False,
+            "repetitive_notes_detection": False,
+            "blind_spot_detection": False,
+        },
+        "disabled_flags": [],
+    }
+
+
+def _wipe_all_caches() -> None:
+    """
+    Completely wipe all in-memory caches, global Pandas DataFrames,
+    and priority status mappings holding previous ML anomalies.
+    """
+    global _report_cache, _assessment_cache, _priority_cache, _alerts_cache, _inventory_cache, _priority_status
+    _report_cache = AnomalyReport(summary=_empty_summary()).to_dict()
+    _assessment_cache = {
+        "overall_score": 100.0,
+        "dimensions": [],
+        "findings": [],
+        "evidence": [],
+        "assets": [],
+        "lifecycle": {
+            "stages": ["Alert", "Case", "Investigation", "Escalation", "Response", "Recovery", "Closure"],
+            "records_assessed": 0,
+            "finding": "No records assessed.",
+        },
+        "basis": "Missing evidence is an assessment signal, not proof that an action did not happen.",
+        "analytics_signal_count": 0,
+    }
+    _priority_cache = []
+    _alerts_cache = None
+    _inventory_cache = None
+    _priority_status.clear()
+
+
+# Initialize caches cleanly
+_wipe_all_caches()
+
+
 def _run_engine(alerts_path: Path, inv_path: Path) -> dict[str, Any]:
     """Run the analytics orchestrator synchronously and return a dict."""
     try:
@@ -108,19 +164,73 @@ def _run_engine(alerts_path: Path, inv_path: Path) -> dict[str, Any]:
 
 
 async def _refresh_cache() -> None:
-    """Run the analytics, assessment and priority engines pulling strictly from PostgreSQL."""
+    """Run the analytics, assessment and priority engines pulling strictly from PostgreSQL using .outerjoin()."""
     global _report_cache, _assessment_cache, _priority_cache, _alerts_cache, _inventory_cache
     try:
         from database import engine
         import pandas as pd
         
-        # Read strictly from the PostgreSQL database
+        # Read strictly from the PostgreSQL database using .outerjoin() to prevent data loss
         with engine.connect() as conn:
-            alerts_df = pd.read_sql("SELECT * FROM soc_alerts", conn)
+            stmt = (
+                select(
+                    SocAlerts.id,
+                    SocAlerts.timestamp,
+                    SocAlerts.alert_id,
+                    SocAlerts.entity_id,
+                    SocAlerts.asset_name,
+                    SocAlerts.alert_category,
+                    SocAlerts.alert_severity,
+                    SocAlerts.time_to_close_seconds,
+                    SocAlerts.escalated,
+                    SocAlerts.resolution_notes,
+                    SocAlerts.is_speed_anomaly,
+                    SocAlerts.is_repetitive_anomaly,
+                    SocAlerts.is_negative_space,
+                    SocAlerts.is_anomaly,
+                    AssetInventory.asset_type,
+                    AssetInventory.department,
+                    AssetInventory.asset_criticality,
+                    CaseManagement.case_id,
+                    CaseManagement.sensor_id,
+                    CaseManagement.mitre_tactic,
+                    CaseManagement.source_ip,
+                    CaseManagement.destination_ip,
+                    InvestigationWorkflows.action_taken,
+                    InvestigationWorkflows.action_timestamp.label("investigation_started"),
+                    InvestigationWorkflows.result.label("investigation_conclusion"),
+                    InvestigationWorkflows.time_spent_minutes,
+                    InvestigationWorkflows.investigator,
+                    EscalationRecords.escalated_from_tier,
+                    EscalationRecords.escalated_to_tier,
+                    EscalationRecords.escalation_reason,
+                    EscalationRecords.escalation_timestamp,
+                    AlertClosures.closure_id,
+                    AlertClosures.closed_by,
+                    AlertClosures.closure_reason,
+                    AlertClosures.closure_timestamp,
+                    AlertClosures.capa_action,
+                )
+                .select_from(SocAlerts)
+                .outerjoin(AssetInventory, SocAlerts.asset_name == AssetInventory.asset_name)
+                .outerjoin(CaseManagement, SocAlerts.alert_id == CaseManagement.alert_id)
+                .outerjoin(InvestigationWorkflows, SocAlerts.alert_id == InvestigationWorkflows.alert_id)
+                .outerjoin(EscalationRecords, SocAlerts.alert_id == EscalationRecords.alert_id)
+                .outerjoin(AlertClosures, SocAlerts.alert_id == AlertClosures.alert_id)
+            )
             try:
-                db_inventory_df = pd.read_sql("SELECT * FROM asset_inventory", conn)
+                alerts_df = pd.read_sql(stmt, conn)
+            except Exception as read_exc:
+                logger.warning("Outerjoin SQL read failed: %s; falling back to direct table read", read_exc)
+                alerts_df = pd.read_sql("SELECT * FROM soc_alerts", conn)
+
+            try:
+                db_inventory_df = pd.read_sql(select(AssetInventory), conn)
             except Exception:
-                db_inventory_df = pd.DataFrame()
+                try:
+                    db_inventory_df = pd.read_sql("SELECT * FROM asset_inventory", conn)
+                except Exception:
+                    db_inventory_df = pd.DataFrame()
 
         # Build inventory_df
         if not db_inventory_df.empty:
@@ -138,13 +248,53 @@ async def _refresh_cache() -> None:
         else:
             inventory_df = pd.DataFrame(columns=["asset_id", "asset_name", "asset_type", "asset_criticality", "department"])
 
+        # Compatibility column mappings for analytics & supervisory assessment
+        if not alerts_df.empty:
+            if "ticket_id" not in alerts_df.columns and "alert_id" in alerts_df.columns:
+                alerts_df["ticket_id"] = alerts_df["alert_id"]
+            if "dest_asset" not in alerts_df.columns and "asset_name" in alerts_df.columns:
+                alerts_df["dest_asset"] = alerts_df["asset_name"]
+            if "alert_type" not in alerts_df.columns and "alert_category" in alerts_df.columns:
+                alerts_df["alert_type"] = alerts_df["alert_category"]
+            if "time_to_close" not in alerts_df.columns and "time_to_close_seconds" in alerts_df.columns:
+                alerts_df["time_to_close"] = alerts_df["time_to_close_seconds"]
+
+            # Explicit dependency validation: check whether time_to_close and resolution_notes were provided
+            has_ttc = (
+                ("time_to_close_seconds" in alerts_df.columns and alerts_df["time_to_close_seconds"].notna().any() and (alerts_df["time_to_close_seconds"] >= 0).any())
+                or ("time_to_close" in alerts_df.columns and alerts_df["time_to_close"].notna().any() and (alerts_df["time_to_close"] >= 0).any())
+            )
+            alerts_df["_has_time_to_close"] = bool(has_ttc)
+            alerts_df.attrs["has_time_to_close"] = bool(has_ttc)
+
+            has_notes = (
+                "resolution_notes" in alerts_df.columns
+                and alerts_df["resolution_notes"].notna().any()
+                and alerts_df["resolution_notes"].astype(str).str.strip().ne("").any()
+            )
+            alerts_df["_has_resolution_notes"] = bool(has_notes)
+            alerts_df.attrs["has_resolution_notes"] = bool(has_notes)
+
         if alerts_df.empty and db_inventory_df.empty:
             alerts_df = pd.DataFrame(columns=[
                 "alert_id", "entity_id", "asset_name", "alert_category",
                 "alert_severity", "time_to_close_seconds", "escalated", "resolution_notes"
             ])
-            result = AnomalyReport().to_dict()
-            assessment = {"findings": [], "overall_assessment": "No data available.", "assets": []}
+            result = AnomalyReport(summary=_empty_summary()).to_dict()
+            assessment = {
+                "overall_score": 100.0,
+                "dimensions": [],
+                "findings": [],
+                "evidence": [],
+                "assets": [],
+                "lifecycle": {
+                    "stages": ["Alert", "Case", "Investigation", "Escalation", "Response", "Recovery", "Closure"],
+                    "records_assessed": 0,
+                    "finding": "No records assessed.",
+                },
+                "basis": "Missing evidence is an assessment signal, not proof that an action did not happen.",
+                "analytics_signal_count": 0,
+            }
             priorities = []
         else:
             if alerts_df.empty:
@@ -152,7 +302,7 @@ async def _refresh_cache() -> None:
                     "alert_id", "entity_id", "asset_name", "alert_category",
                     "alert_severity", "time_to_close_seconds", "escalated", "resolution_notes"
                 ])
-                result = AnomalyReport().to_dict()
+                result = AnomalyReport(summary=_empty_summary()).to_dict()
             else:
                 loop = asyncio.get_event_loop()
                 def _run():
@@ -171,6 +321,35 @@ async def _refresh_cache() -> None:
             )
             for item in priorities:
                 item["status"] = _priority_status.get(item["ticket_id"], item.get("status", "NEW"))
+
+        # Synchronize newly detected ML anomaly flags into the PostgreSQL database
+        if not alerts_df.empty:
+            try:
+                from database import SessionLocal
+                with SessionLocal() as sync_db:
+                    sync_db.query(SocAlerts).update({
+                        SocAlerts.is_speed_anomaly: False,
+                        SocAlerts.is_repetitive_anomaly: False,
+                        SocAlerts.is_negative_space: False,
+                        SocAlerts.is_anomaly: False,
+                    }, synchronize_session=False)
+
+                    speed_ids = [a["ticket_id"] for a in result.get("speed_anomalies", [])]
+                    if speed_ids:
+                        sync_db.query(SocAlerts).filter(SocAlerts.alert_id.in_(speed_ids)).update({
+                            SocAlerts.is_speed_anomaly: True,
+                            SocAlerts.is_anomaly: True,
+                        }, synchronize_session=False)
+
+                    rep_ids = [t for c in result.get("repetitive_notes", []) for t in c.get("ticket_ids", [])]
+                    if rep_ids:
+                        sync_db.query(SocAlerts).filter(SocAlerts.alert_id.in_(rep_ids)).update({
+                            SocAlerts.is_repetitive_anomaly: True,
+                            SocAlerts.is_anomaly: True,
+                        }, synchronize_session=False)
+                    sync_db.commit()
+            except Exception as sync_exc:
+                logger.debug("Database ML anomaly flags sync notice: %s", sync_exc)
 
         async with _cache_lock:
             _report_cache = result
@@ -247,11 +426,14 @@ class AnomalyExplainRequest(BaseModel):
     time_to_close: Optional[int] = None
     analyst: Optional[str] = None
     alert_type: Optional[str] = None
+    alert_category: Optional[str] = None
     escalated: Optional[bool] = None
     asset_id: Optional[str] = None
     actual_alerts: Optional[int] = None
     expected_mean: Optional[float] = None
     explanation: str                      # rule-engine explanation (fallback)
+    resolution_notes: Optional[str] = None
+    entity_id: Optional[str] = None
 
 
 class AnomalyExplainResponse(BaseModel):
@@ -259,6 +441,17 @@ class AnomalyExplainResponse(BaseModel):
     explanation: str
     source: str                           # "ollama" | "rule_engine"
     model: Optional[str] = None
+    recommended_reference: Optional[dict[str, Any]] = None
+
+
+class AuditRecommendRequest(BaseModel):
+    """Payload for the /api/audit/recommend-reference endpoint."""
+    ticket_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    asset_name: Optional[str] = None
+    alert_category: Optional[str] = None
+    alert_severity: Optional[str] = None
+    resolution_notes: Optional[str] = None
 
 
 class PriorityStatusUpdate(BaseModel):
@@ -425,30 +618,373 @@ async def health_check():
     }
 
 
-@app.post("/upload", summary="Upload and ingest SOC alert dataset (.csv or .json)")
-@app.post("/api/upload", summary="Upload and ingest SOC alert dataset (.csv or .json)")
+import zipfile
+
+# ── Hierarchical Ingestion Helpers ──────────────────────────────────────────
+HIERARCHY_LEVELS = {
+    "asset_inventory": 1,
+    "soc_alerts": 2,
+    "case_management": 3,
+    "investigation_workflows": 4,
+    "escalation_records": 5,
+    "alert_closures": 6,
+}
+
+
+def _clean_str(val: Any) -> Optional[str]:
+    if pd.isna(val) or val is None:
+        return None
+    val_str = str(val).strip()
+    return val_str if val_str else None
+
+
+def _clean_int(val: Any) -> Optional[int]:
+    if pd.isna(val) or val is None:
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return None
+
+
+def _clean_bool(val: Any, default: bool = False) -> bool:
+    if pd.isna(val) or val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        return val.strip().lower() in {"true", "1", "yes", "t"}
+    return default
+
+
+def _detect_dataset_type(df: pd.DataFrame, filename: str = "") -> str:
+    cols = {str(c).strip().lower().replace(" ", "_") for c in df.columns}
+    fname = filename.lower()
+
+    if "inventory" in fname or (
+        ("asset_type" in cols or "department" in cols or "asset_criticality" in cols)
+        and not ("alert_id" in cols or "ticket_id" in cols)
+    ):
+        return "asset_inventory"
+
+    if "escalation" in fname or ("escalation_id" in cols or "escalated_from_tier" in cols or "escalation_reason" in cols):
+        return "escalation_records"
+
+    if "workflow" in fname or "investigation" in fname or ("workflow_id" in cols or "action_taken" in cols or "time_spent_minutes" in cols):
+        return "investigation_workflows"
+
+    if "closure" in fname or ("closure_id" in cols or "capa_action" in cols or "closure_reason" in cols or "closed_by" in cols):
+        return "alert_closures"
+
+    if "case" in fname or (
+        ("sensor_id" in cols or "mitre_tactic" in cols or "source_ip" in cols or "destination_ip" in cols)
+        and not ("time_to_close_seconds" in cols or "time_to_close" in cols)
+    ):
+        return "case_management"
+
+    if "alert_id" in cols or "ticket_id" in cols or "time_to_close_seconds" in cols or "alert_category" in cols:
+        return "soc_alerts"
+
+    if "asset_name" in cols or "asset_id" in cols:
+        return "asset_inventory"
+
+    return "soc_alerts"
+
+
+def _ingest_hierarchical_datasets(
+    datasets: list[tuple[str, str, pd.DataFrame]],
+    db: Session,
+) -> dict[str, Any]:
+    """
+    Ingests parsed datasets strictly in parent-first hierarchical order:
+      1. asset_inventory
+      2. soc_alerts
+      3. case_management
+      4. investigation_workflows
+      5. escalation_records
+      6. alert_closures
+    Guarantees zero Foreign Key violations by ensuring parent records exist before inserting child rows.
+    """
+    # Sort strictly by defined hierarchy order
+    sorted_datasets = sorted(datasets, key=lambda item: HIERARCHY_LEVELS.get(item[0], 99))
+    results_summary: dict[str, int] = {}
+
+    for dtype, fname, df in sorted_datasets:
+        # Standardize column headers
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+        if dtype == "asset_inventory":
+            # ── 1. ASSET INVENTORY (Root Parent) ──────────────────────────
+            records = []
+            seen = set()
+            for _, row in df.iterrows():
+                asset_name = _clean_str(row.get("asset_name") or row.get("asset_id") or row.get("asset"))
+                if not asset_name or asset_name in seen:
+                    continue
+                seen.add(asset_name)
+                records.append({
+                    "asset_name": asset_name,
+                    "asset_type": _clean_str(row.get("asset_type") or row.get("type")) or "Server",
+                    "department": _clean_str(row.get("department") or row.get("dept")) or "IT",
+                    "asset_criticality": (_clean_str(row.get("asset_criticality") or row.get("criticality")) or "MEDIUM").upper(),
+                })
+            if records:
+                for rec in records:
+                    db.merge(AssetInventory(**rec))
+                db.commit()
+                results_summary["asset_inventory"] = len(records)
+                logger.info("Hierarchical Ingestion: Upserted %d records into asset_inventory.", len(records))
+
+        elif dtype == "soc_alerts":
+            # ── 2. SOC ALERTS (Child of asset_inventory, Parent of Evidence) ──
+            # Step A: Enforce FK integrity on asset_name by pre-seeding missing assets
+            all_assets = {
+                _clean_str(row.get("asset_name") or row.get("dest_asset") or row.get("asset"))
+                for _, row in df.iterrows()
+            } - {None}
+
+            if all_assets:
+                existing_assets = {
+                    a[0] for a in db.query(AssetInventory.asset_name).filter(AssetInventory.asset_name.in_(all_assets)).all()
+                }
+                missing_assets = all_assets - existing_assets
+                if missing_assets:
+                    for m in missing_assets:
+                        db.add(AssetInventory(
+                            asset_name=m,
+                            asset_type="Server",
+                            department="IT Infrastructure",
+                            asset_criticality="HIGH",
+                        ))
+                    db.commit()
+                    logger.info("Hierarchical Ingestion: Pre-seeded %d missing parent assets into asset_inventory.", len(missing_assets))
+
+            # Step B: Insert SOC alerts
+            alert_records = []
+            seen_alerts = set()
+            for _, row in df.iterrows():
+                raw_alert_id = _clean_str(row.get("alert_id") or row.get("ticket_id"))
+                if not raw_alert_id or raw_alert_id in seen_alerts:
+                    continue
+                seen_alerts.add(raw_alert_id)
+
+                raw_timestamp = (
+                    row.get("timestamp")
+                    if "timestamp" in row and pd.notna(row["timestamp"])
+                    else (row.get("date") or row.get("time") or row.get("created_at"))
+                )
+                raw_entity_id = row.get("entity_id") if "entity_id" in row else row.get("entity")
+                raw_asset_name = row.get("asset_name") if "asset_name" in row else (row.get("dest_asset") or row.get("asset"))
+                raw_category = row.get("alert_category") if "alert_category" in row else (row.get("alert_type") or row.get("category"))
+                raw_severity = row.get("alert_severity") if "alert_severity" in row else row.get("severity")
+                raw_ttc = row.get("time_to_close_seconds") if "time_to_close_seconds" in row else row.get("time_to_close")
+                raw_notes = row.get("resolution_notes") if "resolution_notes" in row else row.get("notes")
+
+                alert_records.append({
+                    "timestamp": _clean_str(raw_timestamp),
+                    "alert_id": raw_alert_id,
+                    "entity_id": _clean_str(raw_entity_id),
+                    "asset_name": _clean_str(raw_asset_name),
+                    "alert_category": _clean_str(raw_category),
+                    "alert_severity": _clean_str(raw_severity),
+                    "time_to_close_seconds": _clean_int(raw_ttc),
+                    "escalated": _clean_bool(row.get("escalated")),
+                    "resolution_notes": _clean_str(raw_notes),
+                    "is_speed_anomaly": _clean_bool(row.get("is_speed_anomaly"), False),
+                    "is_repetitive_anomaly": _clean_bool(row.get("is_repetitive_anomaly"), False),
+                    "is_negative_space": _clean_bool(row.get("is_negative_space"), False),
+                    "is_anomaly": _clean_bool(row.get("is_anomaly"), False),
+                })
+
+            if alert_records:
+                for rec in alert_records:
+                    existing = db.query(SocAlerts).filter(SocAlerts.alert_id == rec["alert_id"]).first()
+                    if existing:
+                        for k, v in rec.items():
+                            setattr(existing, k, v)
+                    else:
+                        db.add(SocAlerts(**rec))
+                db.commit()
+                results_summary["soc_alerts"] = len(alert_records)
+                logger.info("Hierarchical Ingestion: Ingested %d records into soc_alerts.", len(alert_records))
+
+        elif dtype == "case_management":
+            # ── 3. CASE MANAGEMENT (Child of soc_alerts) ───────────────────
+            case_records = []
+            for _, row in df.iterrows():
+                alert_id = _clean_str(row.get("alert_id") or row.get("ticket_id"))
+                if not alert_id:
+                    continue
+                # Ensure parent alert exists
+                parent = db.query(SocAlerts).filter(SocAlerts.alert_id == alert_id).first()
+                if not parent:
+                    parent = SocAlerts(
+                        alert_id=alert_id,
+                        timestamp=_clean_str(row.get("timestamp")),
+                        alert_category=_clean_str(row.get("alert_name") or row.get("category")),
+                        alert_severity=_clean_str(row.get("severity") or "Medium"),
+                    )
+                    db.add(parent)
+                    db.flush()
+
+                case_records.append({
+                    "case_id": _clean_str(row.get("case_id")),
+                    "alert_id": alert_id,
+                    "timestamp": _clean_str(row.get("timestamp")),
+                    "sensor_id": _clean_str(row.get("sensor_id")),
+                    "alert_name": _clean_str(row.get("alert_name")),
+                    "severity": _clean_str(row.get("severity")),
+                    "mitre_tactic": _clean_str(row.get("mitre_tactic")),
+                    "source_ip": _clean_str(row.get("source_ip")),
+                    "destination_ip": _clean_str(row.get("destination_ip")),
+                    "asset_id": _clean_str(row.get("asset_id")),
+                })
+
+            if case_records:
+                db.bulk_insert_mappings(CaseManagement, case_records)
+                db.commit()
+                results_summary["case_management"] = len(case_records)
+                logger.info("Hierarchical Ingestion: Inserted %d records into case_management.", len(case_records))
+
+        elif dtype == "investigation_workflows":
+            # ── 4. INVESTIGATION WORKFLOWS (Child of soc_alerts) ───────────
+            wf_records = []
+            for _, row in df.iterrows():
+                alert_id = _clean_str(row.get("alert_id"))
+                case_id = _clean_str(row.get("case_id"))
+                if not alert_id and case_id:
+                    # Resolve alert_id from CaseManagement if available
+                    linked = db.query(CaseManagement).filter(CaseManagement.case_id == case_id).first()
+                    if linked:
+                        alert_id = linked.alert_id
+                    else:
+                        alert_id = case_id  # fallback to case_id as alert_id stub
+
+                if not alert_id:
+                    continue
+
+                parent = db.query(SocAlerts).filter(SocAlerts.alert_id == alert_id).first()
+                if not parent:
+                    parent = SocAlerts(alert_id=alert_id, alert_category="Investigated Case", alert_severity="Medium")
+                    db.add(parent)
+                    db.flush()
+
+                wf_records.append({
+                    "workflow_id": _clean_str(row.get("workflow_id")),
+                    "alert_id": alert_id,
+                    "case_id": case_id,
+                    "action_taken": _clean_str(row.get("action_taken")),
+                    "action_timestamp": _clean_str(row.get("action_timestamp")),
+                    "result": _clean_str(row.get("result")),
+                    "time_spent_minutes": _clean_int(row.get("time_spent_minutes")),
+                    "investigator": _clean_str(row.get("investigator") or row.get("analyst")),
+                })
+
+            if wf_records:
+                db.bulk_insert_mappings(InvestigationWorkflows, wf_records)
+                db.commit()
+                results_summary["investigation_workflows"] = len(wf_records)
+                logger.info("Hierarchical Ingestion: Inserted %d records into investigation_workflows.", len(wf_records))
+
+        elif dtype == "escalation_records":
+            # ── 5. ESCALATION RECORDS (Child of soc_alerts) ────────────────
+            esc_records = []
+            for _, row in df.iterrows():
+                alert_id = _clean_str(row.get("alert_id"))
+                case_id = _clean_str(row.get("case_id"))
+                if not alert_id and case_id:
+                    linked = db.query(CaseManagement).filter(CaseManagement.case_id == case_id).first()
+                    if linked:
+                        alert_id = linked.alert_id
+                    else:
+                        alert_id = case_id
+
+                if not alert_id:
+                    continue
+
+                parent = db.query(SocAlerts).filter(SocAlerts.alert_id == alert_id).first()
+                if not parent:
+                    parent = SocAlerts(alert_id=alert_id, alert_category="Escalated Case", alert_severity="High", escalated=True)
+                    db.add(parent)
+                    db.flush()
+
+                esc_records.append({
+                    "escalation_id": _clean_str(row.get("escalation_id")),
+                    "alert_id": alert_id,
+                    "case_id": case_id,
+                    "escalated_from_tier": _clean_str(row.get("escalated_from_tier")),
+                    "escalated_to_tier": _clean_str(row.get("escalated_to_tier")),
+                    "escalation_reason": _clean_str(row.get("escalation_reason")),
+                    "escalation_timestamp": _clean_str(row.get("escalation_timestamp")),
+                })
+
+            if esc_records:
+                db.bulk_insert_mappings(EscalationRecords, esc_records)
+                db.commit()
+                results_summary["escalation_records"] = len(esc_records)
+                logger.info("Hierarchical Ingestion: Inserted %d records into escalation_records.", len(esc_records))
+
+        elif dtype == "alert_closures":
+            # ── 6. ALERT CLOSURES (Child of soc_alerts) ────────────────────
+            closure_records = []
+            for _, row in df.iterrows():
+                alert_id = _clean_str(row.get("alert_id"))
+                if not alert_id:
+                    continue
+
+                parent = db.query(SocAlerts).filter(SocAlerts.alert_id == alert_id).first()
+                if not parent:
+                    parent = SocAlerts(alert_id=alert_id, alert_category="Closed Incident", alert_severity="Low")
+                    db.add(parent)
+                    db.flush()
+
+                closure_records.append({
+                    "closure_id": _clean_str(row.get("closure_id")),
+                    "alert_id": alert_id,
+                    "closed_by": _clean_str(row.get("closed_by") or row.get("analyst")),
+                    "closure_reason": _clean_str(row.get("closure_reason")),
+                    "resolution_notes": _clean_str(row.get("resolution_notes")),
+                    "closure_timestamp": _clean_str(row.get("closure_timestamp")),
+                    "capa_action": _clean_str(row.get("capa_action")),
+                    "is_verified": _clean_bool(row.get("is_verified"), False),
+                })
+
+            if closure_records:
+                db.bulk_insert_mappings(AlertClosures, closure_records)
+                db.commit()
+                results_summary["alert_closures"] = len(closure_records)
+                logger.info("Hierarchical Ingestion: Inserted %d records into alert_closures.", len(closure_records))
+
+    return results_summary
+
+
+@app.post("/upload", summary="Upload and ingest SOC evidence datasets (.csv, .json, or .zip)")
+@app.post("/api/upload", summary="Upload and ingest SOC evidence datasets (.csv, .json, or .zip)")
 async def upload_file(
     file: UploadFile = File(...),
+    strict_schema: bool = Query(False, description="Throw 422 if required ML columns (time_to_close_seconds, resolution_notes) are missing"),
     db: Session = Depends(get_db),
 ):
     """
-    Ingest SOC alert datasets in CSV or JSON format.
-    
-    Workflow:
-      1. Validates file extension (.csv or .json).
-      2. Reads the file contents using pandas into a DataFrame.
-      3. Normalizes columns and converts rows into a list of dictionaries.
-      4. Performs a bulk insert into the PostgreSQL SOCAlert table.
-      5. Updates the local cache and triggers background analytics.
-      6. Returns a success JSON response with the total ingested records count.
+    Ingest SOC evidence datasets in CSV, JSON, or ZIP format strictly in hierarchical order:
+      Parent Tables First:  1. AssetInventory -> 2. SocAlerts
+      Child Tables Last:    3. CaseManagement -> 4. InvestigationWorkflows -> 5. EscalationRecords -> 6. AlertClosures
+    Prevents Foreign Key violation errors, completely clears previous caches and anomalies,
+    and refreshes analytics using .outerjoin().
     """
-    filename = file.filename or "uploaded_alerts"
+    # ── State Invalidation 1: Wipe all in-memory caches immediately upon upload request ──
+    async with _cache_lock:
+        _wipe_all_caches()
+
+    filename = file.filename or "uploaded_dataset"
     extension = Path(filename).suffix.lower()
 
-    if extension not in {".csv", ".json", ".pdf", ".docx"}:
+    if extension not in {".csv", ".json", ".zip", ".pdf", ".docx"}:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported file format. Please upload a .csv or .json file.",
+            detail="Unsupported file format. Please upload a .csv, .json, or .zip file.",
         )
 
     # Handle document uploads (PDF/DOCX) for case reviews
@@ -468,224 +1004,170 @@ async def upload_file(
             "total_records": 0,
         }
 
-    # Read binary content into memory
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-    # Parse into pandas DataFrame
+    extracted_tables: list[tuple[str, str, pd.DataFrame]] = []
+
     try:
-        if extension == ".csv":
+        if extension == ".zip":
+            # Extract multiple datasets from zip archive
+            with zipfile.ZipFile(io.BytesIO(contents)) as z:
+                for z_name in z.namelist():
+                    z_ext = Path(z_name).suffix.lower()
+                    if z_ext in {".csv", ".json"} and not z_name.startswith("__MACOSX"):
+                        raw_data = z.read(z_name)
+                        if z_ext == ".csv":
+                            df = pd.read_csv(io.BytesIO(raw_data))
+                        else:
+                            df = pd.read_json(io.BytesIO(raw_data))
+                        if not df.empty:
+                            dtype = _detect_dataset_type(df, z_name)
+                            extracted_tables.append((dtype, z_name, df))
+        elif extension == ".csv":
             df = pd.read_csv(io.BytesIO(contents))
+            if not df.empty:
+                dtype = _detect_dataset_type(df, filename)
+                extracted_tables.append((dtype, filename, df))
         elif extension == ".json":
             df = pd.read_json(io.BytesIO(contents))
-        else:
-            raise ValueError("Unsupported extension")
+            if not df.empty:
+                dtype = _detect_dataset_type(df, filename)
+                extracted_tables.append((dtype, filename, df))
     except Exception as parse_exc:
-        logger.error("Failed to parse %s file: %s", extension, parse_exc)
+        logger.error("Failed to parse uploaded %s file: %s", extension, parse_exc)
         raise HTTPException(
             status_code=400,
             detail=f"Failed to parse {extension.upper()} file: {str(parse_exc)}",
         )
 
-    if df.empty:
-        raise HTTPException(status_code=400, detail="The uploaded file contains no data rows.")
+    if not extracted_tables:
+        raise HTTPException(status_code=400, detail="The uploaded file contains no data rows or recognizable tables.")
 
-    # Normalize column names: lowercase, strip, and replace spaces with underscores
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    # ── Dependency Check & Schema Validation ──
+    for dtype, tbl_name, tdf in extracted_tables:
+        tcols = {str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in tdf.columns}
+        if dtype == "soc_alerts":
+            # Ensure primary key exists
+            if not ({"alert_id", "ticket_id", "id"} & tcols):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unprocessable Entity: Schema in '{tbl_name}' is missing primary identifier 'alert_id' or 'ticket_id'.",
+                )
+            
+            has_ttc = bool({"time_to_close_seconds", "time_to_close", "close_time", "ttc"} & tcols)
+            has_notes = bool({"resolution_notes", "notes", "resolution"} & tcols)
 
-    # Helper cleaners
-    def _clean_str(val: Any) -> Optional[str]:
-        if pd.isna(val) or val is None:
-            return None
-        val_str = str(val).strip()
-        return val_str if val_str else None
+            if strict_schema and (not has_ttc or not has_notes):
+                missing_cols = []
+                if not has_ttc:
+                    missing_cols.append("time_to_close_seconds")
+                if not has_notes:
+                    missing_cols.append("resolution_notes")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unprocessable Entity: Schema in '{tbl_name}' lacks required columns for ML analytics: {', '.join(missing_cols)}. Upload with these columns or run with graceful ML degradation.",
+                )
 
-    def _clean_int(val: Any) -> Optional[int]:
-        if pd.isna(val) or val is None:
-            return None
-        try:
-            return int(float(val))
-        except (ValueError, TypeError):
-            return None
+    # ── State Invalidation 2: Targeted table wiping based on uploaded datasets ──
+    try:
+        uploaded_types = {dt for dt, _, _ in extracted_tables}
+        # If uploading new alerts (soc_alerts) or a multi-table bundle/zip, wipe previous alerts & child tables
+        if "soc_alerts" in uploaded_types or extension == ".zip":
+            db.query(AlertClosures).delete()
+            db.query(EscalationRecords).delete()
+            db.query(InvestigationWorkflows).delete()
+            db.query(CaseManagement).delete()
+            db.query(SocAlerts).delete()
+            if "asset_inventory" in uploaded_types:
+                db.query(AssetInventory).delete()
+        else:
+            # If uploading a specific child evidence table, only wipe that specific table
+            if "alert_closures" in uploaded_types:
+                db.query(AlertClosures).delete()
+            if "escalation_records" in uploaded_types:
+                db.query(EscalationRecords).delete()
+            if "investigation_workflows" in uploaded_types:
+                db.query(InvestigationWorkflows).delete()
+            if "case_management" in uploaded_types:
+                db.query(CaseManagement).delete()
+            if "asset_inventory" in uploaded_types:
+                db.query(AssetInventory).delete()
+        db.commit()
+    except Exception as wipe_err:
+        db.rollback()
+        logger.warning("Database pre-upload table wipe notice: %s", wipe_err)
 
-    def _clean_bool(val: Any, default: bool = False) -> bool:
-        if pd.isna(val) or val is None:
-            return default
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, (int, float)):
-            return bool(val)
-        if isinstance(val, str):
-            return val.strip().lower() in {"true", "1", "yes", "t"}
-        return default
+    try:
+        summary_results = _ingest_hierarchical_datasets(extracted_tables, db)
+    except Exception as db_exc:
+        db.rollback()
+        logger.error("Hierarchical ingestion error: %s", db_exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database hierarchical ingestion error: {str(db_exc)}",
+        )
 
-    # Intelligent Dataset Routing based on CSV / JSON headers
-    if "alert_id" in df.columns or "ticket_id" in df.columns:
-        # ══════════════════════════════════════════════════════════
-        # Condition A: SOC Alert dataset
-        # ══════════════════════════════════════════════════════════
-        records_data: list[dict[str, Any]] = []
-        for _, row in df.iterrows():
-            raw_timestamp = (
-                row.get("timestamp")
-                if "timestamp" in row and pd.notna(row["timestamp"])
-                else (row.get("date") or row.get("time") or row.get("created_at"))
-            )
-            raw_alert_id = row.get("alert_id") if "alert_id" in row else row.get("ticket_id")
-            raw_entity_id = row.get("entity_id") if "entity_id" in row else row.get("entity")
-            raw_asset_name = row.get("asset_name") if "asset_name" in row else (row.get("dest_asset") or row.get("asset"))
-            raw_category = row.get("alert_category") if "alert_category" in row else (row.get("alert_type") or row.get("category"))
-            raw_severity = row.get("alert_severity") if "alert_severity" in row else row.get("severity")
-            raw_ttc = row.get("time_to_close_seconds") if "time_to_close_seconds" in row else row.get("time_to_close")
-            raw_notes = row.get("resolution_notes") if "resolution_notes" in row else row.get("notes")
-
-            record_dict = {
-                "timestamp": _clean_str(raw_timestamp),
-                "alert_id": _clean_str(raw_alert_id),
-                "entity_id": _clean_str(raw_entity_id),
-                "asset_name": _clean_str(raw_asset_name),
-                "alert_category": _clean_str(raw_category),
-                "alert_severity": _clean_str(raw_severity),
-                "time_to_close_seconds": _clean_int(raw_ttc),
-                "escalated": (
-                    _clean_bool(row.get("escalated"))
-                    if "escalated" in row and pd.notna(row["escalated"])
-                    else None
-                ),
-                "resolution_notes": _clean_str(raw_notes),
-                "is_speed_anomaly": _clean_bool(row.get("is_speed_anomaly"), False),
-                "is_repetitive_anomaly": _clean_bool(row.get("is_repetitive_anomaly"), False),
-                "is_negative_space": _clean_bool(row.get("is_negative_space"), False),
-                "is_anomaly": _clean_bool(row.get("is_anomaly"), False),
-            }
-            records_data.append(record_dict)
-
-        try:
-            db.query(SOCAlert).delete()
-            db.bulk_insert_mappings(SOCAlert, records_data)
-            db.commit()
-            logger.info("PostgreSQL: Bulk-inserted %d SOC alert records into soc_alerts table.", len(records_data))
-        except Exception as db_exc:
-            db.rollback()
-            logger.error("PostgreSQL bulk-insert into soc_alerts failed: %s", db_exc)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Database ingestion error: {str(db_exc)}",
-            )
-
-        try:
-            await _refresh_cache()
-        except HTTPException:
-            raise
-        except Exception as engine_err:
-            logger.error("ML Engine failed on uploaded file: %s", engine_err, exc_info=True)
-            raise HTTPException(
-                status_code=400,
-                detail=f"ML Engine Error: {str(engine_err)}",
-            )
-
-        return {
-            "status": "success",
-            "dataset_type": "soc_alerts",
-            "message": f"Detected SOC Alerts dataset: successfully ingested {len(records_data)} alert records.",
-            "filename": filename,
-            "records_ingested": len(records_data),
-            "total_records": len(records_data),
-        }
-
-    elif any(col in df.columns for col in ["asset_type", "department", "asset_criticality", "asset_id", "asset", "asset_name"]):
-        # ══════════════════════════════════════════════════════════
-        # Condition B: Asset Inventory dataset
-        # ══════════════════════════════════════════════════════════
-        inventory_records: list[dict[str, Any]] = []
-        seen_assets = set()
-
-        for _, row in df.iterrows():
-            raw_asset_name = (
-                row.get("asset_name")
-                if "asset_name" in row and pd.notna(row["asset_name"])
-                else (row.get("asset_id") or row.get("asset"))
-            )
-            clean_asset_name = _clean_str(raw_asset_name)
-            if not clean_asset_name or clean_asset_name in seen_assets:
-                continue
-            seen_assets.add(clean_asset_name)
-
-            raw_type = row.get("asset_type") if "asset_type" in row else (row.get("type") or row.get("category"))
-            raw_dept = row.get("department") if "department" in row else (row.get("dept") or row.get("organization"))
-            raw_crit = row.get("asset_criticality") if "asset_criticality" in row else (row.get("criticality") or row.get("severity"))
-
-            inventory_records.append({
-                "asset_name": clean_asset_name,
-                "asset_type": _clean_str(raw_type) or "Server",
-                "department": _clean_str(raw_dept) or "Unassigned",
-                "asset_criticality": (_clean_str(raw_crit) or "MEDIUM").upper(),
-            })
-
-        if not inventory_records:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid asset records found in uploaded Asset Inventory file.",
-            )
-
-        try:
-            db.query(AssetInventory).delete()
-            db.bulk_insert_mappings(AssetInventory, inventory_records)
-            db.commit()
-            logger.info("PostgreSQL: Bulk-inserted %d asset inventory records into asset_inventory table.", len(inventory_records))
-        except Exception as db_exc:
-            db.rollback()
-            logger.error("PostgreSQL bulk-insert into asset_inventory failed: %s", db_exc)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Asset inventory ingestion error: {str(db_exc)}",
-            )
-
-        try:
-            await _refresh_cache()
-        except HTTPException:
-            raise
-        except Exception as engine_err:
-            logger.error("ML Engine failed on uploaded inventory: %s", engine_err, exc_info=True)
-            raise HTTPException(
-                status_code=400,
-                detail=f"ML Engine Error: {str(engine_err)}",
-            )
-
-        return {
-            "status": "success",
-            "dataset_type": "asset_inventory",
-            "message": f"Detected Asset Inventory dataset: successfully ingested {len(inventory_records)} asset records.",
-            "filename": filename,
-            "records_ingested": len(inventory_records),
-            "total_records": len(inventory_records),
-        }
-
-    else:
+    # Refresh analytics caches using .outerjoin() query
+    try:
+        await _refresh_cache()
+    except HTTPException:
+        raise
+    except Exception as engine_err:
+        logger.error("ML Engine failed on uploaded file: %s", engine_err, exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail="Unrecognized dataset format. File must contain 'alert_id' (for SOC Alerts) or 'asset_type'/'department'/'asset_name' (for Asset Inventory).",
+            detail=f"ML Engine Error: {str(engine_err)}",
         )
+
+    total_records = sum(summary_results.values())
+    primary_dataset = extracted_tables[0][0] if len(extracted_tables) == 1 else "relational_evidence_bundle"
+    ml_caps = _report_cache.get("summary", {}).get("ml_capabilities", {})
+    disabled_flags = _report_cache.get("summary", {}).get("disabled_flags", [])
+
+    return {
+        "status": "success",
+        "dataset_type": primary_dataset,
+        "message": f"Hierarchical ingestion complete: {total_records} records ingested across tables in parent-first order.",
+        "filename": filename,
+        "summary": summary_results,
+        "records_ingested": total_records,
+        "total_records": total_records,
+        "ml_capabilities": ml_caps,
+        "ml_flags_disabled": disabled_flags,
+    }
 
 
 @app.delete("/api/data/clear", summary="Clear all SOC and Asset records from database")
 @app.delete("/data/clear", summary="Clear all SOC and Asset records from database")
 async def clear_database(db: Session = Depends(get_db)):
     """
-    Wipe all existing SOC alert and asset inventory records from the PostgreSQL database
-    and reset the in-memory analytics cache.
+    Wipe all existing records from the PostgreSQL database in strict reverse hierarchical order
+    (Child tables first, then Parent tables) and completely reset all in-memory analytics caches.
     """
+    # ── State Invalidation: Wipe all in-memory caches immediately ──
+    async with _cache_lock:
+        _wipe_all_caches()
+
     try:
-        db.query(SOCAlert).delete()
+        # Reverse hierarchical deletion to prevent Foreign Key reference errors
+        db.query(AlertClosures).delete()
+        db.query(EscalationRecords).delete()
+        db.query(InvestigationWorkflows).delete()
+        db.query(CaseManagement).delete()
+        db.query(SocAlerts).delete()
         db.query(AssetInventory).delete()
         db.commit()
-        logger.info("PostgreSQL: All records deleted from soc_alerts and asset_inventory tables.")
+        logger.info("PostgreSQL: All records deleted in reverse hierarchical order from all 6 tables.")
 
         # Synchronously refresh in-memory analytics caches from the now-empty database
         await _refresh_cache()
 
-        return {"message": "Database cleared successfully"}
+        return {
+            "status": "success",
+            "message": "Database and all in-memory analytics caches completely cleared across all normalized relational tables.",
+        }
     except Exception as e:
         db.rollback()
         logger.error("Failed to clear database: %s", e, exc_info=True)
@@ -741,10 +1223,11 @@ async def evidence_records():
 
 
 @app.get("/api/evidence/{ticket_id}", summary="Evidence detail for one ticket")
-async def evidence_detail(ticket_id: str):
+async def evidence_detail(ticket_id: str, db: Session = Depends(get_db)):
     for record in _require_assessment()["evidence"]:
         if record["ticket_id"] == ticket_id:
-            return record
+            rec = recommendation_engine.find_recommendation(record, db=db)
+            return {**record, "recommended_reference": rec}
     raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} was not found.")
 
 
@@ -793,10 +1276,11 @@ async def priorities(severity: Optional[str] = None, status: Optional[str] = Non
 
 
 @app.get("/api/priorities/{ticket_id}", summary="Priority detail for one ticket")
-async def priority_detail(ticket_id: str):
+async def priority_detail(ticket_id: str, db: Session = Depends(get_db)):
     for item in _require_priorities():
         if item["ticket_id"] == ticket_id:
-            return {"recommendation_only": True, **item}
+            rec = recommendation_engine.find_recommendation(item, db=db)
+            return {"recommendation_only": True, **item, "recommended_reference": rec}
     raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} was not found.")
 
 
@@ -840,39 +1324,128 @@ async def export_report(request: ReportExportRequest):
     return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CROSS-CSE AUDIT RECOMMENDATION ENGINE ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/audit/recommend-reference", summary="Cross-CSE Audit Recommendation via Local TF-IDF NLP Similarity")
+async def recommend_reference(request: AuditRecommendRequest, db: Session = Depends(get_db)):
+    """
+    Given a ticket/anomaly being audited on the supervisor dashboard, runs an offline
+    TF-IDF cosine similarity text-matching engine against historically audited tickets.
+    Returns recommended_reference if match > 85%.
+    """
+    target = request.model_dump()
+    # If ticket_id provided, look up full context if resolution_notes missing
+    if target.get("ticket_id") and not target.get("resolution_notes"):
+        t_id = target["ticket_id"]
+        db_alert = db.query(SocAlerts).filter(SocAlerts.alert_id == t_id).first()
+        if db_alert:
+            target["resolution_notes"] = db_alert.resolution_notes
+            target["alert_category"] = target.get("alert_category") or db_alert.alert_category
+            target["alert_severity"] = target.get("alert_severity") or db_alert.alert_severity
+            target["entity_id"] = target.get("entity_id") or db_alert.entity_id
+
+    rec = recommendation_engine.find_recommendation(target, db=db)
+    return {
+        "status": "success",
+        "threshold": recommendation_engine.threshold,
+        "has_recommendation": rec is not None,
+        "recommended_reference": rec,
+    }
+
+
+@app.get("/api/audit/recommend-reference/{ticket_id}", summary="Get Cross-CSE Recommendation for specific ticket")
+async def recommend_reference_by_ticket(ticket_id: str, db: Session = Depends(get_db)):
+    """
+    Fetches ticket details for ticket_id and runs offline similarity matching against historically audited tickets.
+    """
+    target = None
+    try:
+        db_alert = db.query(SocAlerts).filter(SocAlerts.alert_id == ticket_id).first()
+        if db_alert:
+            target = db_alert.to_dict()
+    except Exception:
+        pass
+
+    if not target and _alerts_cache is not None and not _alerts_cache.empty:
+        id_col = "alert_id" if "alert_id" in _alerts_cache.columns else ("ticket_id" if "ticket_id" in _alerts_cache.columns else None)
+        if id_col:
+            match = _alerts_cache[_alerts_cache[id_col] == ticket_id]
+            if not match.empty:
+                target = match.iloc[0].to_dict()
+
+    if not target and _assessment_cache and "evidence" in _assessment_cache:
+        for rec in _assessment_cache["evidence"]:
+            if rec.get("ticket_id") == ticket_id:
+                target = rec
+                break
+
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} was not found.")
+
+    rec = recommendation_engine.find_recommendation(target, db=db)
+    return {
+        "ticket_id": ticket_id,
+        "has_recommendation": rec is not None,
+        "recommended_reference": rec,
+    }
+
+
 @app.post(
     "/api/explain-anomaly",
     response_model=AnomalyExplainResponse,
-    summary="Generate a 2-sentence AI explanation for a flagged anomaly",
+    summary="Generate a 2-sentence AI explanation for a flagged anomaly and check Cross-CSE recommendation",
 )
-async def explain_anomaly(request: AnomalyExplainRequest):
+async def explain_anomaly(request: AnomalyExplainRequest, db: Session = Depends(get_db)):
     """
     Uses LangChain + local Ollama to generate a professional audit explanation.
-    Falls back gracefully if Ollama is offline, unreachable, or times out.
-    All inference is 100% local — no external API calls.
+    Simultaneously runs local Cross-CSE TF-IDF NLP similarity against historically solved tickets.
+    If match > 85%, appends recommended_reference to the response.
+    All inference is 100% local — zero external API calls.
     """
     payload = {
-        "anomaly_type":  request.anomaly_type,
-        "ticket_id":     request.ticket_id     or "N/A",
-        "severity":      request.severity       or "N/A",
-        "time_to_close": request.time_to_close  or "N/A",
-        "analyst":       request.analyst        or "N/A",
-        "alert_type":    request.alert_type     or "N/A",
-        "escalated":     request.escalated      if request.escalated is not None else "N/A",
-        "asset_id":      request.asset_id       or "N/A",
-        "actual_alerts": request.actual_alerts  if request.actual_alerts is not None else "N/A",
-        "expected_mean": request.expected_mean  if request.expected_mean is not None else "N/A",
-        "explanation":   request.explanation,
+        "anomaly_type":     request.anomaly_type,
+        "ticket_id":        request.ticket_id        or "N/A",
+        "severity":         request.severity          or "N/A",
+        "time_to_close":    request.time_to_close     or "N/A",
+        "analyst":          request.analyst           or "N/A",
+        "alert_type":       request.alert_type        or "N/A",
+        "alert_category":   request.alert_category    or request.alert_type or "N/A",
+        "escalated":        request.escalated         if request.escalated is not None else "N/A",
+        "asset_id":         request.asset_id          or "N/A",
+        "actual_alerts":    request.actual_alerts     if request.actual_alerts is not None else "N/A",
+        "expected_mean":    request.expected_mean     if request.expected_mean is not None else "N/A",
+        "explanation":      request.explanation,
+        "resolution_notes": request.resolution_notes  or request.explanation,
+        "entity_id":        request.entity_id         or "N/A",
     }
 
+    # If ticket_id is available and resolution notes missing, fetch from database
+    if request.ticket_id and (not request.resolution_notes or request.resolution_notes == request.explanation):
+        try:
+            db_alert = db.query(SocAlerts).filter(SocAlerts.alert_id == request.ticket_id).first()
+            if db_alert:
+                payload["resolution_notes"] = db_alert.resolution_notes or payload["resolution_notes"]
+                payload["alert_category"] = db_alert.alert_category or payload["alert_category"]
+                payload["severity"] = db_alert.alert_severity or payload["severity"]
+                payload["entity_id"] = db_alert.entity_id or payload["entity_id"]
+        except Exception:
+            pass
+
+    # 1. Generate supervisory explanation via Ollama / fallback
     explanation, source = await generate_llm_rationale(
         payload=payload,
         fallback_text=request.explanation,
         timeout=5.0,
     )
 
+    # 2. Run instant offline Cross-CSE similarity matching
+    recommendation = recommendation_engine.find_recommendation(payload, db=db)
+
     return AnomalyExplainResponse(
         explanation=explanation,
         source=source,
         model=OLLAMA_MODEL if source == "ollama" else None,
+        recommended_reference=recommendation,
     )

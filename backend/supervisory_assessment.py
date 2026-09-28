@@ -49,9 +49,31 @@ def _derive_ticket(row: pd.Series) -> dict[str, Any]:
     severity = _text(row.get("alert_severity"), "UNKNOWN").upper()
     notes = _text(row.get("resolution_notes"))
     legacy_escalated = _bool(row.get("escalated"))
+    has_ttc = bool(row.get("_has_time_to_close", False))
+    if not has_ttc:
+        raw_ttc = row.get("time_to_close_seconds") if "time_to_close_seconds" in row else row.get("time_to_close")
+        try:
+            has_ttc = pd.notna(raw_ttc) and raw_ttc is not None and str(raw_ttc).strip() != "" and float(raw_ttc) >= 0
+        except (ValueError, TypeError):
+            has_ttc = False
+
+    if has_ttc:
+        try:
+            ttc_val = int(float(row.get("time_to_close", 0) or 0))
+            speed_anomaly = severity in {"CRITICAL", "HIGH"} and ttc_val >= 0 and ttc_val < ({"CRITICAL": 120, "HIGH": 60}.get(severity, 0))
+        except (ValueError, TypeError):
+            speed_anomaly = False
+    else:
+        speed_anomaly = False
+
     has_notes = bool(notes.strip())
-    speed_anomaly = severity in {"CRITICAL", "HIGH"} and int(row.get("time_to_close", 0) or 0) < ({"CRITICAL": 120, "HIGH": 60}.get(severity, 0))
-    repetitive_note = notes in {"Resolved per SOP.", "False positive, no action needed.", "Ticket auto-closed after initial review.", "No threat detected upon investigation.", "Issue resolved. Closing ticket."}
+    repetitive_note = has_notes and notes in {
+        "Resolved per SOP.",
+        "False positive, no action needed.",
+        "Ticket auto-closed after initial review.",
+        "No threat detected upon investigation.",
+        "Issue resolved. Closing ticket.",
+    }
     investigation = _observed(row, "investigation_started", has_notes)
     investigator = _text(row.get("investigator"), _text(row.get("assigned_analyst")))
     evidence_attached = _observed(row, "evidence_attached", has_notes and not (speed_anomaly or repetitive_note))
@@ -149,29 +171,56 @@ def build_assessment(alerts_df: pd.DataFrame, inventory_df: pd.DataFrame, report
         item["evidence_completeness"] = next(score["Evidence Completeness"] for score, source in zip(ticket_scores, tickets) if source["ticket_id"] == ticket["ticket_id"])
         item["assessment"] = "Attention" if any(f["entity"] == ticket["ticket_id"] for f in attention_findings) else "Adequate"
         evidence.append(item)
-    asset_counts = alerts_df["dest_asset"].value_counts().to_dict() if "dest_asset" in alerts_df else {}
+    # Build a robust asset_counts dict: aggregate from both dest_asset and asset_name,
+    # excluding sentinel "Unknown Asset" entries so they don't pollute real asset lookups.
+    _asset_count_dict: dict = {}
+    for _col in ["dest_asset", "asset_name"]:
+        if _col in alerts_df.columns:
+            for _val, _cnt in alerts_df[_col].value_counts().items():
+                _val_str = str(_val).strip()
+                if _val_str and _val_str.lower() not in {"unknown asset", "unknown", "nan", "none", ""}:
+                    # Merge: take the max count seen from either column (avoids double-counting)
+                    _asset_count_dict[_val_str] = max(_asset_count_dict.get(_val_str, 0), int(_cnt))
+
     assets = []
     for _, asset in inventory_df.iterrows():
         crit = asset.get("asset_criticality", "Medium")
-        
-        # Safely get series for peer comparison without KeyError
-        crit_col = inventory_df["asset_criticality"] if "asset_criticality" in inventory_df.columns else pd.Series([crit] * len(inventory_df))
-        id_col = inventory_df["asset_id"] if "asset_id" in inventory_df.columns else inventory_df.get("asset_name", pd.Series(["Unknown"] * len(inventory_df)))
-        
-        peer = id_col[crit_col == crit].map(asset_counts).fillna(0)
-        
-        asset_id_val = asset.get("asset_id", asset.get("asset_name", "Unknown"))
-        volume = int(asset_counts.get(asset_id_val, 0))
-        expected = round(float(peer.mean()), 1) if len(peer) else 0.0
-        
+
+        # Build the peer group series — prefer asset_name as the canonical key
+        _name_col = (
+            inventory_df["asset_name"] if "asset_name" in inventory_df.columns
+            else inventory_df.get("asset_id", pd.Series(["Unknown"] * len(inventory_df)))
+        )
+        crit_col = (
+            inventory_df["asset_criticality"] if "asset_criticality" in inventory_df.columns
+            else pd.Series([crit] * len(inventory_df))
+        )
+
+        peer_keys = _name_col[crit_col == crit]
+        peer = peer_keys.map(_asset_count_dict).fillna(0)
+
+        # Determine this asset's canonical key — try both asset_name and asset_id
+        asset_name_val = str(asset.get("asset_name", asset.get("asset_id", "Unknown"))).strip()
+        asset_id_val = str(asset.get("asset_id", asset_name_val)).strip()
+
+        # Resolve alert volume: try asset_name first, then asset_id
+        volume = int(
+            _asset_count_dict.get(asset_name_val, _asset_count_dict.get(asset_id_val, 0))
+        )
+        expected = round(float(peer.mean()), 1) if len(peer) > 0 else 0.0
+
         assets.append({
-            "asset": asset_id_val,
+            "asset": asset_name_val,
             "criticality": crit,
             "type": asset.get("asset_type", "Unknown"),
             "department": asset.get("department", "Unassigned"),
             "alert_volume": volume,
             "expected_peer_volume": expected,
             "deviation": round(volume - expected, 1),
-            "monitoring_status": "Telemetry silence requiring review" if volume == 0 and str(crit).upper() in {"CRITICAL", "HIGH"} else "Observed"
+            "monitoring_status": (
+                "Telemetry silence requiring review"
+                if volume == 0 and str(crit).upper() in {"CRITICAL", "HIGH"}
+                else "Observed"
+            ),
         })
     return {"overall_score": overall, "dimensions": dimensions, "findings": attention_findings, "evidence": evidence, "assets": assets, "lifecycle": {"stages": ["Alert", "Case", "Investigation", "Escalation", "Response", "Recovery", "Closure"], "records_assessed": len(tickets), "finding": "Required evidence was not observed in the supplied records where applicable."}, "basis": "Missing evidence is an assessment signal, not proof that an action did not happen.", "analytics_signal_count": (report or {}).get("summary", {}).get("total_flagged_anomalies", 0)}

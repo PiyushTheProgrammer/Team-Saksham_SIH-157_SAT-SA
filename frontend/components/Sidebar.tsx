@@ -10,6 +10,7 @@ import {
   Radar,
   Users,
   ShieldCheck,
+  ListChecks,
   LucideIcon,
 } from "lucide-react";
 
@@ -128,6 +129,7 @@ export function Sidebar({ path, setPath, isOpen, onClose }: SidebarProps) {
               {navItem({ href: "/execution-gaps", label: "Execution Gaps", icon: Activity })}
               {navItem({ href: "/negative-space", label: "Negative Space", icon: Radar })}
               {navItem({ href: "/peer-comparison", label: "Peer Comparison", icon: Users })}
+              {navItem({ href: "/prioritizer", label: "AI Prioritization & CAPA", icon: ListChecks })}
             </div>
           </div>
 

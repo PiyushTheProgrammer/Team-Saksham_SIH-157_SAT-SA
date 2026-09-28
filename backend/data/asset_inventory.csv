@@ -1,0 +1,51 @@
+asset_id,asset_criticality,asset_type,department
+prod-db-01,CRITICAL,Database Server,IT Infrastructure
+prod-auth-srv,CRITICAL,Authentication Server,Engineering
+prod-pay-gw,CRITICAL,Payment Gateway,Finance
+prod-vault-01,CRITICAL,Secrets Vault,IT Infrastructure
+prod-ci-master,CRITICAL,CI/CD Controller,Engineering
+prod-app-1,HIGH,Application Server,Engineering
+prod-db-2,CRITICAL,Database Server,IT Infrastructure
+stg-web-3,MEDIUM,Web Server,Engineering
+stg-app-4,MEDIUM,Application Server,Engineering
+dev-ws-5,LOW,Workstation,Engineering
+corp-ws-6,LOW,Workstation,Operations
+fin-ws-7,MEDIUM,Workstation,Finance
+hr-ws-8,LOW,Workstation,HR
+exec-ws-9,MEDIUM,Workstation,Executive Office
+net-fw-10,HIGH,Firewall,IT Infrastructure
+net-sw-11,MEDIUM,Network Switch,IT Infrastructure
+mail-srv-12,HIGH,Mail Server,IT Infrastructure
+file-srv-13,MEDIUM,File Server,Operations
+vpn-gw-14,HIGH,VPN Gateway,IT Infrastructure
+prod-web-15,HIGH,Web Server,Engineering
+prod-app-16,HIGH,Application Server,Engineering
+prod-db-17,CRITICAL,Database Server,IT Infrastructure
+stg-web-18,MEDIUM,Web Server,Engineering
+stg-app-19,MEDIUM,Application Server,Engineering
+dev-ws-20,LOW,Workstation,Engineering
+corp-ws-21,LOW,Workstation,Operations
+fin-ws-22,MEDIUM,Workstation,Finance
+hr-ws-23,LOW,Workstation,HR
+exec-ws-24,MEDIUM,Workstation,Executive Office
+net-fw-25,HIGH,Firewall,IT Infrastructure
+net-sw-26,MEDIUM,Network Switch,IT Infrastructure
+mail-srv-27,HIGH,Mail Server,IT Infrastructure
+file-srv-28,MEDIUM,File Server,Operations
+vpn-gw-29,HIGH,VPN Gateway,IT Infrastructure
+prod-web-30,HIGH,Web Server,Engineering
+prod-app-31,HIGH,Application Server,Engineering
+prod-db-32,CRITICAL,Database Server,IT Infrastructure
+stg-web-33,MEDIUM,Web Server,Engineering
+stg-app-34,MEDIUM,Application Server,Engineering
+dev-ws-35,LOW,Workstation,Engineering
+corp-ws-36,LOW,Workstation,Operations
+fin-ws-37,MEDIUM,Workstation,Finance
+hr-ws-38,LOW,Workstation,HR
+exec-ws-39,MEDIUM,Workstation,Executive Office
+net-fw-40,HIGH,Firewall,IT Infrastructure
+net-sw-41,MEDIUM,Network Switch,IT Infrastructure
+mail-srv-42,HIGH,Mail Server,IT Infrastructure
+file-srv-43,MEDIUM,File Server,Operations
+vpn-gw-44,HIGH,VPN Gateway,IT Infrastructure
+prod-web-45,HIGH,Web Server,Engineering

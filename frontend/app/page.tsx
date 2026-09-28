@@ -413,29 +413,69 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
       </section>
 
       <section className="panel">
-        <h2>Format Reference</h2>
-        <p className="chart-note">Your file must contain the following fields (CSV header row or JSON keys):</p>
-        <table className="mini-table" style={{ marginTop: 8 }}>
-          <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
-          <tbody>
-            {[
-              ["alert_id", "string", "Unique alert identifier (e.g. AL-1001)"],
-              ["entity_id", "string", "Entity / organisation identifier (e.g. ENT-A)"],
-              ["asset_name", "string", "Affected asset name (e.g. web-server-01)"],
-              ["alert_category", "string", "Alert category (Malware, DDoS, Unauthorised Access)"],
-              ["alert_severity", "string", "Severity level: Critical / High / Medium / Low"],
-              ["time_to_close_seconds", "integer", "Resolution time in seconds"],
-              ["escalated", "boolean", "Whether the alert was escalated (True / False)"],
-              ["resolution_notes", "string", "Free-text analyst notes"],
-            ].map(([field, type, desc]) => (
-              <tr key={field}>
-                <td><code style={{ color: "var(--accent)", fontSize: 11 }}>{field}</code></td>
-                <td style={{ color: "var(--text-secondary)" }}>{type}</td>
-                <td style={{ color: "var(--text-secondary)" }}>{desc}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="section-heading" style={{ marginBottom: 12 }}>
+          <div>
+            <h2>Relational Evidence Schema &amp; Hierarchical Ingestion</h2>
+            <p className="chart-note">Ingestion runs strictly in hierarchical order (Parent tables first, then Child tables) with explicit Foreign Key validation.</p>
+          </div>
+          <span className="tag blue">POSTGRESQL RELATIONAL</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginTop: 12 }}>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 1 (Root Parent): AssetInventory
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>Primary key: <code>asset_name</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>asset_name, asset_type, department, asset_criticality</code>
+            </div>
+          </div>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 2 (Parent of Evidence): SocAlerts
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>FK: <code>asset_name &rarr; asset_inventory</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>alert_id, entity_id, asset_name, alert_category, alert_severity, time_to_close_seconds, escalated, resolution_notes</code>
+            </div>
+          </div>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 3: Case Management
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>FK: <code>alert_id &rarr; soc_alerts.alert_id</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>case_id, alert_id, timestamp, sensor_id, alert_name, severity, mitre_tactic, source_ip, destination_ip</code>
+            </div>
+          </div>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 3: Investigation Workflows
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>FK: <code>alert_id &rarr; soc_alerts.alert_id</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>workflow_id, alert_id, case_id, action_taken, action_timestamp, result, time_spent_minutes, investigator</code>
+            </div>
+          </div>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 3: Escalation Records
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>FK: <code>alert_id &rarr; soc_alerts.alert_id</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>escalation_id, alert_id, case_id, escalated_from_tier, escalated_to_tier, escalation_reason, escalation_timestamp</code>
+            </div>
+          </div>
+          <div style={{ background: "#f8fafc", padding: 14, borderRadius: 8, border: "1px solid #e2e8f0" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#1e3a8a", display: "block", marginBottom: 6 }}>
+              Level 3: Alert Closures &amp; CAPA
+            </span>
+            <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 8px" }}>FK: <code>alert_id &rarr; soc_alerts.alert_id</code></p>
+            <div style={{ fontSize: 11, color: "#334155" }}>
+              Columns: <code>closure_id, alert_id, closed_by, closure_reason, resolution_notes, closure_timestamp, capa_action, is_verified</code>
+            </div>
+          </div>
+        </div>
       </section>
     </Page>
   );
@@ -1149,6 +1189,7 @@ function Findings() {
 }
 
 function PriorityWorkspace() {
+  // ── All hooks at the top — Rules of Hooks compliance ──
   const [data, setData] = useState<RecordValue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -1157,7 +1198,23 @@ function PriorityWorkspace() {
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [sort, setSort] = useState("score");
   const [selected, setSelected] = useState<RecordValue | null>(null);
+  const [recommendedRef, setRecommendedRef] = useState<RecordValue | null>(null);
+  const [showCapa, setShowCapa] = useState<boolean>(true);
+
   useEffect(() => { json("/api/priorities").then(setData).catch(e => setError(e.message)); }, []);
+
+  // Fetch Cross-CSE recommendation whenever the selected ticket changes
+  useEffect(() => {
+    if (!selected?.ticket_id) { setRecommendedRef(null); return; }
+    setRecommendedRef(null);
+    json(`/api/audit/recommend-reference/${selected.ticket_id}`)
+      .then(res => {
+        if (res?.has_recommendation && res?.recommended_reference?.match_found) {
+          setRecommendedRef(res.recommended_reference);
+        }
+      })
+      .catch(() => {});
+  }, [selected]);
 
   async function updateStatus(ticketId: string, nextStatus: string) {
     try {
@@ -1234,6 +1291,55 @@ function PriorityWorkspace() {
             <button className="close" aria-label="Close" onClick={() => setSelected(null)}>✕</button>
           </div>
           <p className="subtitle">Priority {selected.priority_score} | {selected.severity} | {selected.asset}</p>
+
+          {/* Cross-CSE Similar Ticket Reference Notification Banner */}
+          {recommendedRef && (
+            <div style={{
+              margin: "14px 0",
+              padding: "14px",
+              background: "#eff6ff",
+              border: "1px solid #bfdbfe",
+              borderRadius: 8,
+              fontSize: 13,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                <span style={{ fontWeight: 700, color: "#1e40af", fontSize: 12 }}>Cross-CSE Audit Reference Available</span>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "1px 6px", borderRadius: 999, background: "#dcfce7", color: "#15803d" }}>
+                  {recommendedRef.similarity_score}% Match
+                </span>
+                <span style={{ fontSize: 11, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#dbeafe", color: "#1e40af" }}>
+                  {recommendedRef.matched_entity_id}
+                </span>
+              </div>
+              <p style={{ margin: "0 0 10px", color: "#1e293b", fontSize: 13, lineHeight: 1.4, fontWeight: 500 }}>
+                You have audited a similar anomaly from another CSE before. Do you want to review that historical Corrective Action (CAPA) as a reference?
+              </p>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setShowCapa(!showCapa)}
+                style={{ fontSize: 12, padding: "5px 12px", background: "#2563eb", color: "#fff", borderRadius: 6, border: "none", cursor: "pointer" }}
+              >
+                {showCapa ? "Hide Historical CAPA" : "Review Historical CAPA"}
+              </button>
+              {showCapa && (
+                <div style={{ marginTop: 10, padding: 10, background: "#fff", borderRadius: 6, border: "1px solid #cbd5e1" }}>
+                  <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
+                    Historical Precedent: <strong>{recommendedRef.matched_ticket_id}</strong> ({recommendedRef.matched_entity_id}) &mdash; {recommendedRef.matched_category}
+                  </div>
+                  {recommendedRef.historical_notes && (
+                    <div style={{ fontSize: 11, fontStyle: "italic", color: "#475569", marginBottom: 6 }}>
+                      &ldquo;{recommendedRef.historical_notes}&rdquo;
+                    </div>
+                  )}
+                  <div style={{ fontSize: 12, color: "#15803d", fontWeight: 600, background: "#f0fdf4", padding: "8px 10px", borderRadius: 4, borderLeft: "3px solid #16a34a" }}>
+                    {recommendedRef.historical_capa}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <label className="detail-status">Review status
             <select aria-label="Update status" value={selected.status} onChange={e => updateStatus(selected.ticket_id, e.target.value)}>
               {["NEW", "UNDER_REVIEW", "ASSIGNED", "INVESTIGATING", "ESCALATED", "RESOLVED", "CLOSED"].map(v => <option key={v}>{v}</option>)}
@@ -1323,7 +1429,8 @@ export default function App() {
         path === "/negative-space" ? <NegativeSpace setPath={setPath} /> :
           path === "/peer-comparison" ? <PeerComparison setPath={setPath} /> :
             path === "/audit-reports" ? <AuditReports /> :
-              <Overview setPath={setPath} />;
+              path === "/prioritizer" ? <PriorityWorkspace /> :
+                <Overview setPath={setPath} />;
 
   return <Shell path={path} setPath={setPath}>{page}</Shell>;
 }
