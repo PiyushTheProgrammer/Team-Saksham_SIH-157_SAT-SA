@@ -1,0 +1,5 @@
+alert_id,timestamp,sensor_id,alert_name,severity,mitre_tactic,source_ip,destination_ip,asset_id
+AL-5001,2026-09-15T08:12:00Z,SENS-FW-01,Multiple Failed Logins,High,Credential Access,192.168.1.45,10.0.0.15,AST-101
+AL-5002,2026-09-19T09:45:00Z,SENS-EDR-02,Suspicious PowerShell Execution,Critical,Execution,Local,Local,AST-102
+AL-5003,2026-09-24T11:05:00Z,SENS-IDS-01,Outbound Traffic to Malicious IP,Medium,Command and Control,10.0.0.50,198.51.100.22,AST-103
+AL-5004,2026-09-28T14:30:00Z,SENS-AV-04,Known Malware Signature Detected,Low,Initial Access,Local,Local,AST-104

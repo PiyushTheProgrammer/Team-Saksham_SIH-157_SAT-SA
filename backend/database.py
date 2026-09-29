@@ -27,19 +27,23 @@ load_dotenv()
 
 # ── Connection Parameters ───────────────────────────────────────────────────
 DATABASE_USER = os.getenv("DATABASE_USER", "postgres")
-DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD", "Admin@123")
+DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD", "")
 
 DATABASE_HOST = os.getenv("DATABASE_HOST", "localhost")
 DATABASE_PORT = int(os.getenv("DATABASE_PORT", "5432"))
 DATABASE_NAME = os.getenv("DATABASE_NAME", "sat_sa_db")
 
-# URL-encode password to handle special characters (e.g., '@', ':', '/') safely
-encoded_password = quote_plus(DATABASE_PASSWORD)
-
-# Connection string format: postgresql://postgres:<password>@localhost:5432/sat_sa_db
-SQLALCHEMY_DATABASE_URL = (
-    f"postgresql://{DATABASE_USER}:{encoded_password}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
-)
+# URL-encode password if present to handle special characters (e.g., '@', ':', '/') safely
+if DATABASE_PASSWORD:
+    encoded_password = quote_plus(DATABASE_PASSWORD)
+    SQLALCHEMY_DATABASE_URL = (
+        f"postgresql://{DATABASE_USER}:{encoded_password}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
+    )
+else:
+    encoded_password = ""
+    SQLALCHEMY_DATABASE_URL = (
+        f"postgresql://{DATABASE_USER}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
+    )
 
 # ── SQLAlchemy Engine ───────────────────────────────────────────────────────
 # pool_pre_ping tests connection liveness before issuing queries;
@@ -87,9 +91,10 @@ def ensure_database_exists() -> None:
 
     for admin_db in ["postgres", "template1"]:
         try:
-            admin_url = (
-                f"postgresql://{DATABASE_USER}:{encoded_password}@{DATABASE_HOST}:{DATABASE_PORT}/{admin_db}"
-            )
+            if encoded_password:
+                admin_url = f"postgresql://{DATABASE_USER}:{encoded_password}@{DATABASE_HOST}:{DATABASE_PORT}/{admin_db}"
+            else:
+                admin_url = f"postgresql://{DATABASE_USER}@{DATABASE_HOST}:{DATABASE_PORT}/{admin_db}"
             admin_engine = create_raw_engine(admin_url, isolation_level="AUTOCOMMIT")
             with admin_engine.connect() as conn:
                 exists = conn.execute(

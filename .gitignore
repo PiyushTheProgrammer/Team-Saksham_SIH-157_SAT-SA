@@ -1,11 +1,14 @@
 # Environments
 .env
 .env.local
+backend/.env
+frontend/.env.local
 
 # Node
 node_modules/
 dist/
 build/
+.next/
 
 # Python
 __pycache__/
@@ -25,7 +28,3 @@ synthetic_soc_data.csv
 
 # Documents
 *.docx
-# Datasets
-Sample Datasets/
-
-Sample Datasets/

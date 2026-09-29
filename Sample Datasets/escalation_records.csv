@@ -1,0 +1,2 @@
+escalation_id,case_id,escalated_from_tier,escalated_to_tier,escalation_reason,escalation_timestamp
+ESC-01,CAS-902,Tier-1,Tier-3,Payload analysis requires reverse engineering expertise,2026-09-24T10:15:00Z

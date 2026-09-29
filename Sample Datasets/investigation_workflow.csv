@@ -1,0 +1,5 @@
+workflow_id,case_id,action_taken,action_timestamp,result,time_spent_minutes
+WF-001,CAS-901,Queried Active Directory logs,2026-09-24T08:20:00Z,Identified brute force source,5
+WF-002,CAS-901,Reset user credentials,2026-09-24T08:35:00Z,Password reset successful,10
+WF-003,CAS-902,Analyzed memory dump,2026-09-24T09:55:00Z,Found obfuscated payload,15
+WF-004,CAS-903,Checked firewall logs,2026-09-24T11:11:00Z,No action taken,1

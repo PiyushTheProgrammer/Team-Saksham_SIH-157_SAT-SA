@@ -3,13 +3,16 @@
 SAT-SA: Unified One-Click Environment Setup & Self-Healing Script
 ================================================================
 Automates end-to-end setup for any fresh clone:
-1. Python version & environment validation (Python 3.10 - 3.13)
+1. Python version & environment validation (Python 3.10 - 3.14+)
 2. Virtual environment creation & requirements installation
 3. Node.js (v18+) & npm verification, automated frontend package install
-4. PostgreSQL service validation, credential testing, and automated database creation (sat_sa_db)
-5. Database schema migration & table initialization
-6. Optional Ollama local LLM status check
-7. Clear diagnostic error messages if any prerequisite is missing
+4. Interactive PostgreSQL database configuration & automated table initialization
+5. Optional Ollama local LLM status check
+6. Clear diagnostic guidance and error self-healing
+
+NOTE: An internet connection is ONLY required during this initial setup
+to download dependencies (pip, npm, Ollama model). Once downloaded,
+SAT-SA operates 100% offline with zero external network dependencies.
 
 Usage:
     python setup.py
@@ -103,7 +106,7 @@ def check_python_environment():
 
     if major < 3 or (major == 3 and minor < 10):
         print_error(
-            f"Python {major}.{minor} is not supported. SAT-SA requires Python 3.10, 3.11, 3.12, or 3.13.\n"
+            f"Python {major}.{minor} is not supported. SAT-SA requires Python 3.10, 3.11, 3.12, 3.13, or 3.14+.\n"
             f"Please download and install Python from: https://www.python.org/downloads/"
         )
         sys.exit(1)
@@ -243,37 +246,21 @@ def check_port_open(host, port, timeout=2.0):
 
 
 def setup_postgresql(py_exec):
-    print_step(3, "Validating PostgreSQL Service & Auto-Creating Database")
+    print_step(3, "Configuring PostgreSQL Database & Connection")
 
     env_file = BACKEND_DIR / ".env"
-    env_example = BACKEND_DIR / ".env.example"
-
-    if not env_file.exists():
-        if env_example.exists():
-            shutil.copy(str(env_example), str(env_file))
-            print_success("Created 'backend/.env' from template.")
-        else:
-            with open(env_file, "w") as f:
-                f.write(
-                    "DATABASE_USER=postgres\n"
-                    "DATABASE_PASSWORD=Admin@123\n"
-                    "DATABASE_HOST=localhost\n"
-                    "DATABASE_PORT=5432\n"
-                    "DATABASE_NAME=sat_sa_db\n"
-                )
-            print_success("Generated default 'backend/.env'.")
-
-    # Read current .env
     env_vars = {}
-    with open(env_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env_vars[k.strip()] = v.strip()
+
+    if env_file.exists():
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = v.strip()
 
     db_user = env_vars.get("DATABASE_USER", "postgres")
-    db_pass = env_vars.get("DATABASE_PASSWORD", "Admin@123")
+    db_pass = env_vars.get("DATABASE_PASSWORD", "")
     db_host = env_vars.get("DATABASE_HOST", "localhost")
     db_port = int(env_vars.get("DATABASE_PORT", "5432"))
     db_name = env_vars.get("DATABASE_NAME", "sat_sa_db")
@@ -295,26 +282,28 @@ def setup_postgresql(py_exec):
             print_info("Start PostgreSQL service using: sudo systemctl start postgresql")
         sys.exit(1)
 
-    print_success(f"PostgreSQL port {db_port} is open and listening.")
+    print_success(f"PostgreSQL service detected on port {db_port}.")
 
-    # 2. Test Connection & Auto-Create Database
-    check_script = f"""
+    # Helper function to test credentials and create target database
+    def test_and_create_db(user, password, host, port, target_db):
+        script = f"""
 import sys
-import os
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text
 
-user = '{db_user}'
-password = '{db_pass}'
-host = '{db_host}'
-port = {db_port}
-target_db = '{db_name}'
+user = {repr(user)}
+password = {repr(password)}
+host = {repr(host)}
+port = {port}
+target_db = {repr(target_db)}
 
-encoded_pass = quote_plus(password)
+encoded_pass = quote_plus(password) if password else ""
+conn_base = f"postgresql://{{user}}:{{encoded_pass}}@{{host}}:{{port}}" if password else f"postgresql://{{user}}@{{host}}:{{port}}"
 connected = False
+
 for admin_db in ['postgres', 'template1']:
     try:
-        url = f"postgresql://{{user}}:{{encoded_pass}}@{{host}}:{{port}}/{{admin_db}}"
+        url = f"{{conn_base}}/{{admin_db}}"
         engine = create_engine(url, isolation_level="AUTOCOMMIT")
         with engine.connect() as conn:
             exists = conn.execute(
@@ -340,34 +329,81 @@ if not connected:
     print("CONNECTION_FAILED")
     sys.exit(3)
 """
+        return run_cmd([py_exec, "-c", script], capture=True)
 
-    ok, out, err = run_cmd([py_exec, "-c", check_script], capture=True)
+    # 2. Interactive setup: prompt for password and db name if not configured or auth fails
+    needs_prompt = not db_pass
 
-    if "AUTH_FAILED" in out:
-        print_error(f"PostgreSQL authentication failed for user '{db_user}'.")
-        print_info(f"The password in 'backend/.env' (currently '{db_pass}') was rejected by PostgreSQL.")
-        new_pass = input(f"\nPlease enter your actual PostgreSQL '{db_user}' password: ").strip()
-        if new_pass:
-            db_pass = new_pass
-            # Update .env
-            env_vars["DATABASE_PASSWORD"] = db_pass
-            with open(env_file, "w") as f:
-                for k, v in env_vars.items():
-                    f.write(f"{k}={v}\n")
-            print_info("Updated 'backend/.env' with new password. Retrying database creation...")
-            
-            # Retry
-            retry_script = check_script.replace(f"password = '{env_vars.get('DATABASE_PASSWORD', '')}'", f"password = '{db_pass}'")
-            ok, out, err = run_cmd([py_exec, "-c", retry_script], capture=True)
+    if not needs_prompt:
+        # Test if existing credentials in .env work
+        print_info(f"Testing existing credentials in 'backend/.env' (User: '{db_user}', DB: '{db_name}')...")
+        ok, out, err = test_and_create_db(db_user, db_pass, db_host, db_port, db_name)
+        if "DATABASE_CREATED" in out:
+            print_success(f"Database '{db_name}' created automatically.")
+        elif "DATABASE_EXISTS" in out:
+            print_success(f"Database '{db_name}' verified and ready.")
+        else:
+            print_warning("Existing password in 'backend/.env' failed authentication.")
+            needs_prompt = True
 
-    if "DATABASE_CREATED" in out:
-        print_success(f"Database '{db_name}' did not exist; created automatically!")
-    elif "DATABASE_EXISTS" in out:
-        print_success(f"Database '{db_name}' verified and ready.")
-    else:
-        print_error(f"Could not connect to PostgreSQL: {out} {err}")
-        print_info("Check that username and password in 'backend/.env' match your local PostgreSQL install.")
-        sys.exit(1)
+    if needs_prompt:
+        print("\n" + "-" * 56)
+        print("  PostgreSQL Setup & Database Configuration")
+        print("-" * 56)
+        
+        entered_user = input(f"  Enter PostgreSQL Username [{db_user}]: ").strip()
+        if entered_user:
+            db_user = entered_user
+
+        entered_db = input(f"  Enter Database Name to use or create [{db_name}]: ").strip()
+        if entered_db:
+            db_name = entered_db
+
+        max_attempts = 3
+        connected = False
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                import getpass
+                entered_pass = getpass.getpass(f"  Enter PostgreSQL password for '{db_user}': ").strip()
+            except Exception:
+                entered_pass = input(f"  Enter PostgreSQL password for '{db_user}': ").strip()
+
+            db_pass = entered_pass
+            ok, out, err = test_and_create_db(db_user, db_pass, db_host, db_port, db_name)
+
+            if "DATABASE_CREATED" in out:
+                print_success(f"Database '{db_name}' created successfully on PostgreSQL!")
+                connected = True
+                break
+            elif "DATABASE_EXISTS" in out:
+                print_success(f"Database '{db_name}' verified and ready on PostgreSQL.")
+                connected = True
+                break
+            elif "AUTH_FAILED" in out:
+                print_error(f"Authentication failed for user '{db_user}'.")
+                if attempt < max_attempts:
+                    print_info(f"Please try again ({attempt}/{max_attempts}).")
+                else:
+                    print_error("Maximum password attempts reached. Please verify your PostgreSQL credentials.")
+                    sys.exit(1)
+            else:
+                print_error(f"Could not connect to PostgreSQL: {out} {err}")
+                sys.exit(1)
+
+    # 3. Save verified parameters to backend/.env
+    env_vars["DATABASE_USER"] = db_user
+    env_vars["DATABASE_PASSWORD"] = db_pass
+    env_vars["DATABASE_HOST"] = db_host
+    env_vars["DATABASE_PORT"] = str(db_port)
+    env_vars["DATABASE_NAME"] = db_name
+
+    with open(env_file, "w") as f:
+        f.write("# PostgreSQL Database Configuration\n")
+        for k, v in env_vars.items():
+            f.write(f"{k}={v}\n")
+
+    print_success(f"Updated 'backend/.env' with verified database '{db_name}' settings.")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -423,6 +459,10 @@ def main():
     print("\n" + "=" * 64)
     print("  SAT-SA: Supervisory Analytics Tool for SOC Assessment")
     print("  Automated Prototype Setup & Self-Healing Installer (SIH-26157)")
+    print("=" * 64)
+    print("  [NOTE] Internet is ONLY required during first-time setup")
+    print("  to download dependencies (pip packages, npm, Ollama model).")
+    print("  After setup, SAT-SA operates 100% offline (air-gap ready).")
     print("=" * 64 + "\n")
 
     start_time = time.time()
