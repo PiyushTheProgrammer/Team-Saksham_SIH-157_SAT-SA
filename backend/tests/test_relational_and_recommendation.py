@@ -174,3 +174,45 @@ def test_explain_anomaly_includes_recommendation(client):
     assert ref is not None
     assert ref["match_found"] is True
     assert ref["similarity_score"] >= 85.0
+
+
+def test_simultaneous_multi_file_upload(client):
+    """Verify multiple CSV datasets can be uploaded simultaneously in a single HTTP POST request."""
+    inv_csv = (
+        "asset_name,asset_type,department,asset_criticality\n"
+        "cluster-db-99,Database,Finance,CRITICAL\n"
+        "cluster-app-99,Server,Engineering,HIGH\n"
+    )
+    alerts_csv = (
+        "timestamp,alert_id,entity_id,asset_name,alert_category,alert_severity,time_to_close_seconds,escalated,resolution_notes\n"
+        "2026-09-18T14:00:00Z,MULTI-TKT-01,CSE-Multi,cluster-db-99,Data Exfiltration,Critical,12,False,Isolated database node.\n"
+        "2026-09-18T15:00:00Z,MULTI-TKT-02,CSE-Multi,cluster-app-99,DDoS,High,40,True,Applied rate limit rules.\n"
+    )
+    closures_csv = (
+        "closure_id,alert_id,closed_by,closure_reason,resolution_notes,closure_timestamp\n"
+        "CLS-99,MULTI-TKT-01,Lead Auditor,Verified Incident,Isolated database node.,2026-09-18T14:10:00Z\n"
+    )
+
+    res = client.post(
+        "/api/upload",
+        files=[
+            ("files", ("asset_inventory.csv", inv_csv.encode("utf-8"), "text/csv")),
+            ("files", ("soc_alerts.csv", alerts_csv.encode("utf-8"), "text/csv")),
+            ("files", ("alert_closures.csv", closures_csv.encode("utf-8"), "text/csv")),
+        ],
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert len(body["files_processed"]) == 3
+    assert body["summary"]["asset_inventory"] == 2
+    assert body["summary"]["soc_alerts"] == 2
+    assert body["summary"]["alert_closures"] == 1
+    assert body["records_ingested"] == 5
+
+    # Verify dashboard shows the newly ingested records
+    dash = client.get("/api/dashboard/summary")
+    assert dash.status_code == 200
+    assert dash.json()["summary"]["total_alerts"] >= 2
+

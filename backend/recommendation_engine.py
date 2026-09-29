@@ -25,8 +25,16 @@ import logging
 from typing import Any, Optional
 
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except (ImportError, Exception):
+    SKLEARN_AVAILABLE = False
+    TfidfVectorizer = None
+    cosine_similarity = None
+
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -133,12 +141,18 @@ class CrossCseRecommendationEngine:
     def __init__(self, threshold: float = 0.85):
         self.threshold = threshold
         # Dual vectorizer using sublinear term frequencies and word n-grams for semantic robustness
-        self.vectorizer = TfidfVectorizer(
-            ngram_range=(1, 2),
-            stop_words="english",
-            sublinear_tf=True,
-            lowercase=True,
-        )
+        if SKLEARN_AVAILABLE and TfidfVectorizer is not None:
+            try:
+                self.vectorizer = TfidfVectorizer(
+                    ngram_range=(1, 2),
+                    stop_words="english",
+                    sublinear_tf=True,
+                    lowercase=True,
+                )
+            except Exception:
+                self.vectorizer = None
+        else:
+            self.vectorizer = None
 
     def _normalize_severity(self, sev: Optional[str]) -> str:
         return str(sev or "").strip().upper()
@@ -184,19 +198,22 @@ class CrossCseRecommendationEngine:
         if t1.lower() == t2.lower():
             return 1.0
 
-        try:
-            # TF-IDF cosine similarity
-            tfidf_matrix = self.vectorizer.fit_transform([t1, t2])
-            sim = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
-            return float(np.clip(sim, 0.0, 1.0))
-        except Exception:
-            # Fallback to Jaccard token similarity if vectorizer encounters single uninformative terms
-            tokens1 = set(t1.lower().split())
-            tokens2 = set(t2.lower().split())
-            union = tokens1 | tokens2
-            if not union:
-                return 0.0
-            return float(len(tokens1 & tokens2) / len(union))
+        if self.vectorizer is not None and cosine_similarity is not None:
+            try:
+                # TF-IDF cosine similarity
+                tfidf_matrix = self.vectorizer.fit_transform([t1, t2])
+                sim = float(cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0])
+                return float(np.clip(sim, 0.0, 1.0))
+            except Exception:
+                pass
+
+        # Fallback to Jaccard token similarity if vectorizer is unavailable or errors
+        tokens1 = set(t1.lower().split())
+        tokens2 = set(t2.lower().split())
+        union = tokens1 | tokens2
+        if not union:
+            return 0.0
+        return float(len(tokens1 & tokens2) / len(union))
 
     def evaluate_match(
         self,

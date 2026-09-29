@@ -139,10 +139,10 @@ function Tag({ value }: { value: string }) {
 /* Upload Progress Bar Component                                        */
 /* ------------------------------------------------------------------ */
 const UPLOAD_STAGES = [
-  { label: "Uploading Data", from: 0, to: 25 },
-  { label: "Running Scikit-Learn Anomaly Detection", from: 25, to: 60 },
-  { label: "Generating Local LLM Rationales", from: 60, to: 90 },
-  { label: "Finalizing Audit Records", from: 90, to: 100 },
+  { label: "Uploading Datasets", from: 0, to: 25 },
+  { label: "Hierarchical Schema & Table Ingestion", from: 25, to: 60 },
+  { label: "Offline Anomaly Detectors & Cross-CSE Audit", from: 60, to: 90 },
+  { label: "Finalizing Supervisory Records", from: 90, to: 100 },
 ] as const;
 
 function UploadProgressBar({ progress }: { progress: number }) {
@@ -185,13 +185,32 @@ function UploadProgressBar({ progress }: { progress: number }) {
 /* ------------------------------------------------------------------ */
 function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
   const router = useRouter();
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [uploading, setUploading] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  function addFiles(newFiles: File[]) {
+    if (!newFiles.length) return;
+    setError("");
+    setSuccessMsg("");
+    setFiles(prev => {
+      const existing = new Set(prev.map(f => `${f.name}:${f.size}`));
+      const filtered = newFiles.filter(f => !existing.has(`${f.name}:${f.size}`));
+      return [...prev, ...filtered];
+    });
+  }
+
+  function removeFile(index: number) {
+    setFiles(prev => prev.filter((_, i) => i !== index));
+  }
+
+  function clearFileList() {
+    setFiles([]);
+  }
 
   async function handleClearDatabase() {
     const confirmed = window.confirm(
@@ -206,7 +225,7 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
     try {
       const response = await request("/api/data/clear", { method: "DELETE" });
       const data = await response.json();
-      setFile(null);
+      setFiles([]);
       setProgress(null);
       setSuccessMsg(data?.message || "Database cleared successfully.");
       router.refresh();
@@ -217,28 +236,14 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
     }
   }
 
-  async function handleUpload(targetFile: File) {
-    setFile(targetFile);
+  async function handleUpload(targetFiles?: File[]) {
+    const toUpload = targetFiles && targetFiles.length > 0 ? targetFiles : files;
+    if (!toUpload.length) return;
+
     setError("");
     setSuccessMsg("");
     setUploading(true);
     setProgress(0);
-
-    // ── Stage 1: Uploading Data (0 → 25) ─────────────────────────────
-    const advanceTo = (target: number, duration: number) =>
-      new Promise<void>(resolve => {
-        const start = Date.now();
-        const startPct = progress ?? 0;
-        function tick() {
-          const elapsed = Date.now() - start;
-          const fraction = Math.min(elapsed / duration, 1);
-          const current = Math.round(startPct + (target - startPct) * fraction);
-          setProgress(current);
-          if (fraction < 1) requestAnimationFrame(tick);
-          else resolve();
-        }
-        tick();
-      });
 
     let currentPct = 0;
     const animate = async (target: number, duration: number) => {
@@ -258,28 +263,35 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
     };
 
     try {
-      // Fire actual upload while stage 1 animation plays
+      // Fire actual upload with all files in multipart form
       const form = new FormData();
-      form.append("file", targetFile);
+      toUpload.forEach(f => {
+        form.append("files", f);
+        form.append("file", f);
+      });
 
       const uploadPromise = request("/api/upload", { method: "POST", body: form });
 
       // Stage 1: 0 → 25 (network upload)
       await animate(25, 900);
 
-      // Stage 2: 25 → 60 (wait for backend + animate)
+      // Stage 2: 25 → 60 (hierarchical parsing & table ingestion)
       await animate(60, 1400);
 
-      // Stage 3: 60 → 90 (LLM rationale simulation)
+      // Stage 3: 60 → 90 (offline ML anomaly models & caching)
       await animate(90, 1200);
 
       // Await actual API response before finalizing
-      await uploadPromise;
+      const response = await uploadPromise;
+      const resJson = await response.json().catch(() => null);
 
       // Stage 4: 90 → 100 (finalize)
       await animate(100, 600);
 
-      // Brief pause at 100% then navigate
+      const msg = resJson?.message || `Successfully ingested ${toUpload.length} dataset file(s).`;
+      setSuccessMsg(msg);
+
+      // Brief pause at 100% then navigate to dashboard
       await new Promise(r => setTimeout(r, 800));
       router.refresh();
       setPath("/");
@@ -292,25 +304,32 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
   }
 
   function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (f) handleUpload(f);
-  }
-  function onDrop(e: React.DragEvent) {
-    e.preventDefault(); setDragOver(false);
-    const f = e.dataTransfer.files?.[0]; if (f) handleUpload(f);
+    const list = Array.from(e.target.files || []);
+    if (list.length > 0) addFiles(list);
+    e.target.value = "";
   }
 
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const list = Array.from(e.dataTransfer.files || []);
+    if (list.length > 0) addFiles(list);
+  }
+
+  const totalSizeKB = (files.reduce((sum, f) => sum + f.size, 0) / 1024).toFixed(1);
+
   return (
-    <Page title="Data Ingestion" subtitle="Upload SOC alert data for supervisory analysis. Accepted formats: CSV and JSON.">
+    <Page title="Data Ingestion" subtitle="Upload SOC alert datasets for supervisory analysis. Upload multiple CSV, JSON, or ZIP tables simultaneously.">
       <section className="panel" style={{ marginBottom: 20 }}>
         <div className="section-heading" style={{ marginBottom: 24 }}>
           <div>
-            <h2>Upload Dataset</h2>
-            <p className="chart-note">All processing is local. No data leaves the system.</p>
+            <h2>Upload Datasets (Multi-File Ingestion)</h2>
+            <p className="chart-note">All processing is air-gapped and 100% local. Files are ingested strictly in hierarchical parent-first order.</p>
           </div>
-          <span className="tag amber">LOCAL PROCESSING</span>
+          <span className="tag amber">LOCAL AIR-GAPPED</span>
         </div>
 
-        {/* Drop zone — single unbroken dashed border, fully centred content */}
+        {/* Drop zone — supports multiple files via click or drag-and-drop */}
         <label
           htmlFor="file-upload-input"
           onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -322,7 +341,7 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
             alignItems: "center",
             justifyContent: "center",
             width: "100%",
-            padding: "48px 32px",
+            padding: "42px 28px",
             border: `2px dashed ${dragOver ? "var(--accent)" : "#cbd5e1"}`,
             borderRadius: 12,
             background: dragOver ? "var(--accent-dim)" : "#f8fafc",
@@ -339,20 +358,149 @@ function DataIngestion({ setPath }: { setPath: (p: string) => void }) {
               d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
           </svg>
           <p style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
-            Drag &amp; drop your dataset here
+            Drag &amp; drop multiple datasets here
           </p>
           <p style={{ margin: 0, fontSize: 14, color: "var(--text-secondary)" }}>
-            or click to browse &mdash; accepts <strong>.csv</strong> and <strong>.json</strong>
+            or click to browse &mdash; select multiple <strong>.csv</strong>, <strong>.json</strong>, or <strong>.zip</strong> files at once
           </p>
-          <input id="file-upload-input" type="file" accept=".csv,.json" onChange={onFileChange} style={{ display: "none" }} />
+          <div style={{ marginTop: 12, display: "inline-flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+            <span className="tag blue" style={{ fontSize: 11 }}>Multi-File Supported</span>
+            <span className="tag green" style={{ fontSize: 11 }}>Automatic Hierarchy Ordering</span>
+            <span className="tag purple" style={{ fontSize: 11 }}>Foreign Key Safe</span>
+          </div>
+          <input
+            id="file-upload-input"
+            type="file"
+            accept=".csv,.json,.zip"
+            multiple
+            onChange={onFileChange}
+            style={{ display: "none" }}
+          />
         </label>
 
+        {/* Selected files preview cards */}
+        {files.length > 0 && (
+          <div style={{
+            marginTop: 18,
+            padding: "16px 20px",
+            background: "#ffffff",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "0 1px 3px rgba(0,0,0,0.04)"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "var(--text-primary)" }}>
+                  Selected Files ({files.length} file{files.length > 1 ? "s" : ""})
+                </span>
+                <span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+                  &bull; Total: {totalSizeKB} KB
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <label
+                  htmlFor="file-upload-input"
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "var(--accent)",
+                    cursor: uploading ? "not-allowed" : "pointer",
+                    textDecoration: "underline"
+                  }}
+                >
+                  + Add more files
+                </label>
+                <span style={{ color: "#cbd5e1" }}>|</span>
+                <button
+                  type="button"
+                  onClick={clearFileList}
+                  disabled={uploading}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    fontSize: 13,
+                    fontWeight: 500,
+                    color: "#dc2626",
+                    cursor: uploading ? "not-allowed" : "pointer",
+                    padding: 0
+                  }}
+                >
+                  Clear all
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              {files.map((f, idx) => {
+                const ext = f.name.split(".").pop()?.toUpperCase() || "FILE";
+                return (
+                  <div
+                    key={`${f.name}-${idx}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 12px",
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: 8,
+                      fontSize: 13,
+                    }}
+                  >
+                    <span style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "2px 5px",
+                      borderRadius: 4,
+                      background: ext === "CSV" ? "#e0f2fe" : ext === "JSON" ? "#fef3c7" : "#f1f5f9",
+                      color: ext === "CSV" ? "#0369a1" : ext === "JSON" ? "#b45309" : "#475569"
+                    }}>
+                      {ext}
+                    </span>
+                    <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{f.name}</span>
+                    <span style={{ color: "var(--text-muted)", fontSize: 12 }}>({(f.size / 1024).toFixed(1)} KB)</span>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(idx)}
+                      disabled={uploading}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "#94a3b8",
+                        cursor: uploading ? "not-allowed" : "pointer",
+                        fontWeight: 700,
+                        fontSize: 16,
+                        lineHeight: 1,
+                        padding: "0 2px",
+                        marginLeft: 4,
+                      }}
+                      title="Remove file"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
-          {file
-            ? <span className="file-badge">&#128196; {file.name} <span style={{ color: "var(--text-secondary)" }}>({(file.size / 1024).toFixed(1)} KB)</span></span>
-            : <span className="file-badge" style={{ color: "var(--text-muted)" }}>No file selected</span>}
-          <button className="btn-primary" onClick={() => file && handleUpload(file)} disabled={!file || uploading || clearing}>
-            {uploading ? "Processing…" : "Submit for Analysis"}
+          {files.length === 0 && (
+            <span className="file-badge" style={{ color: "var(--text-muted)" }}>No files selected yet</span>
+          )}
+          <button
+            className="btn-primary"
+            onClick={() => handleUpload()}
+            disabled={files.length === 0 || uploading || clearing}
+          >
+            {uploading
+              ? "Ingesting & Analyzing…"
+              : files.length > 1
+                ? `Submit ${files.length} Datasets for Analysis`
+                : files.length === 1
+                  ? "Submit for Analysis"
+                  : "Select Datasets to Analyze"}
           </button>
           <button
             type="button"

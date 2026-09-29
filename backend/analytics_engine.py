@@ -18,6 +18,7 @@ All processing is 100 % offline — no network calls.
 
 from __future__ import annotations
 
+import re
 import json
 import hashlib
 from dataclasses import dataclass, field, asdict
@@ -26,9 +27,17 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import IsolationForest
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    from sklearn.ensemble import IsolationForest
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except (ImportError, Exception):
+    SKLEARN_AVAILABLE = False
+    IsolationForest = None
+    TfidfVectorizer = None
+    cosine_similarity = None
 
 
 # ════════════════════════════════════════════════
@@ -345,12 +354,18 @@ class SpeedAnomalyDetector:
     """
 
     def __init__(self, contamination: float = 0.05, random_state: int = 42):
-        self.model = IsolationForest(
-            contamination=contamination,
-            random_state=random_state,
-            n_estimators=200,
-            n_jobs=-1,
-        )
+        if SKLEARN_AVAILABLE and IsolationForest is not None:
+            try:
+                self.model = IsolationForest(
+                    contamination=contamination,
+                    random_state=random_state,
+                    n_estimators=200,
+                    n_jobs=-1,
+                )
+            except Exception:
+                self.model = None
+        else:
+            self.model = None
 
     def detect(self, df: pd.DataFrame) -> list[SpeedAnomaly]:
         """Run detection on the alerts DataFrame. Returns flagged tickets."""
@@ -373,12 +388,18 @@ class SpeedAnomalyDetector:
             return []
 
         # Fit the model and get anomaly scores (lower = more anomalous)
-        try:
-            self.model.fit(features)
-            df["anomaly_score"] = self.model.decision_function(features)
-        except Exception:
-            # Fallback if IsolationForest fails (e.g. edge cases)
-            df["anomaly_score"] = 0.0
+        if self.model is not None:
+            try:
+                self.model.fit(features)
+                df["anomaly_score"] = self.model.decision_function(features)
+            except Exception:
+                # Fallback if IsolationForest fails (e.g. edge cases)
+                df["anomaly_score"] = 0.0
+        else:
+            # Fallback when IsolationForest is unavailable:
+            # Compute score based on speed of closure relative to typical duration (smaller ttc = more negative/anomalous)
+            ttc_series = pd.to_numeric(df["time_to_close"], errors="coerce").fillna(0).clip(lower=1)
+            df["anomaly_score"] = -1.0 * (100.0 / (ttc_series + 1.0))
 
         # Primary detection: rule-based severity threshold filter
         # Secondary signal: Isolation Forest anomaly score for ranking
@@ -520,17 +541,33 @@ class RepetitiveNotesDetector:
 
         remaining_notes = [notes[i] for i in remaining_indices]
 
-        try:
-            vectorizer = TfidfVectorizer(
-                max_features=5000,
-                stop_words="english",
-                ngram_range=(1, 2),
-            )
-            tfidf_matrix = vectorizer.fit_transform(remaining_notes)
-            sim_matrix = cosine_similarity(tfidf_matrix)
-        except ValueError:
-            # Edge case: all notes are empty or too short for TF-IDF
-            return clusters
+        sim_matrix = None
+        if SKLEARN_AVAILABLE and TfidfVectorizer is not None and cosine_similarity is not None:
+            try:
+                vectorizer = TfidfVectorizer(
+                    max_features=5000,
+                    stop_words="english",
+                    ngram_range=(1, 2),
+                )
+                tfidf_matrix = vectorizer.fit_transform(remaining_notes)
+                sim_matrix = cosine_similarity(tfidf_matrix)
+            except (ValueError, Exception):
+                sim_matrix = None
+
+        if sim_matrix is None:
+            # High-performance Jaccard similarity fallback on word tokens when sklearn/scipy is unavailable
+            token_sets = [set(re.findall(r"\w+", t.lower())) for t in remaining_notes]
+            m = len(remaining_notes)
+            sim_matrix = np.eye(m, dtype=float)
+            for i in range(m):
+                for j in range(i + 1, m):
+                    s1, s2 = token_sets[i], token_sets[j]
+                    if not s1 or not s2:
+                        sim = 1.0 if not s1 and not s2 else 0.0
+                    else:
+                        sim = len(s1 & s2) / len(s1 | s2)
+                    sim_matrix[i, j] = sim
+                    sim_matrix[j, i] = sim
 
         # Greedy clustering on the similarity matrix
         used = set()
@@ -696,11 +733,16 @@ class AnalyticsOrchestrator:
 
     def __init__(
         self,
-        alerts_df: pd.DataFrame | None = None,
-        inventory_df: pd.DataFrame | None = None,
+        alerts_df: pd.DataFrame | Path | str | None = None,
+        inventory_df: pd.DataFrame | Path | str | None = None,
     ):
-        self._alerts_df = alerts_df
-        self._inventory_df = inventory_df
+        self._alerts_df = alerts_df if isinstance(alerts_df, pd.DataFrame) else None
+        self._inventory_df = inventory_df if isinstance(inventory_df, pd.DataFrame) else None
+        self._alerts_source = alerts_df if not isinstance(alerts_df, pd.DataFrame) else None
+        self._inventory_source = inventory_df if not isinstance(inventory_df, pd.DataFrame) else None
+
+        if self._alerts_source is not None and self._alerts_df is None:
+            self.load_data()
 
         # If inventory_df is not provided or empty, dynamically query PostgreSQL AssetInventory
         if self._inventory_df is None or (isinstance(self._inventory_df, pd.DataFrame) and self._inventory_df.empty):
@@ -712,6 +754,13 @@ class AnalyticsOrchestrator:
                     self._inventory_df = db_inv
             except Exception:
                 pass
+
+    def load_data(self) -> None:
+        """Load data from file paths or sources if provided."""
+        if self._alerts_source is not None:
+            self._alerts_df = pd.read_csv(self._alerts_source)
+        if self._inventory_source is not None:
+            self._inventory_df = pd.read_csv(self._inventory_source)
 
     @property
     def alerts_df(self) -> pd.DataFrame:

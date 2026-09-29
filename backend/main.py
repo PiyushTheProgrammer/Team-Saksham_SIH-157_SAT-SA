@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 import aiofiles
 import pandas as pd
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -963,87 +963,133 @@ def _ingest_hierarchical_datasets(
 @app.post("/upload", summary="Upload and ingest SOC evidence datasets (.csv, .json, or .zip)")
 @app.post("/api/upload", summary="Upload and ingest SOC evidence datasets (.csv, .json, or .zip)")
 async def upload_file(
-    file: UploadFile = File(...),
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    files: Optional[list[UploadFile]] = File(None),
     strict_schema: bool = Query(False, description="Throw 422 if required ML columns (time_to_close_seconds, resolution_notes) are missing"),
     db: Session = Depends(get_db),
 ):
     """
-    Ingest SOC evidence datasets in CSV, JSON, or ZIP format strictly in hierarchical order:
+    Ingest one or multiple SOC evidence datasets in CSV, JSON, or ZIP format strictly in hierarchical order:
       Parent Tables First:  1. AssetInventory -> 2. SocAlerts
       Child Tables Last:    3. CaseManagement -> 4. InvestigationWorkflows -> 5. EscalationRecords -> 6. AlertClosures
     Prevents Foreign Key violation errors, completely clears previous caches and anomalies,
-    and refreshes analytics using .outerjoin().
+    and refreshes analytics using .outerjoin(). Supports single or multiple file uploads simultaneously.
     """
     # ── State Invalidation 1: Wipe all in-memory caches immediately upon upload request ──
     async with _cache_lock:
         _wipe_all_caches()
 
-    filename = file.filename or "uploaded_dataset"
-    extension = Path(filename).suffix.lower()
+    # Collect all uploaded files from form, files list, and single file argument
+    uploaded_files: list[UploadFile] = []
+    seen_ids = set()
 
-    if extension not in {".csv", ".json", ".zip", ".pdf", ".docx"}:
+    try:
+        form = await request.form()
+        for key in ("files", "file"):
+            for item in form.getlist(key):
+                if hasattr(item, "filename") and id(item) not in seen_ids:
+                    seen_ids.add(id(item))
+                    uploaded_files.append(item)
+        for _, item in form.multi_items():
+            if hasattr(item, "filename") and id(item) not in seen_ids:
+                seen_ids.add(id(item))
+                uploaded_files.append(item)
+    except Exception:
+        pass
+
+    if not uploaded_files:
+        if files:
+            for f in files:
+                if id(f) not in seen_ids:
+                    seen_ids.add(id(f))
+                    uploaded_files.append(f)
+        if file and id(file) not in seen_ids:
+            seen_ids.add(id(file))
+            uploaded_files.append(file)
+
+    if not uploaded_files:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported file format. Please upload a .csv, .json, or .zip file.",
+            detail="No files uploaded. Please attach at least one .csv, .json, or .zip file.",
         )
 
-    # Handle document uploads (PDF/DOCX) for case reviews
-    if extension in {".pdf", ".docx"}:
-        case_dir = DATA_DIR / "case_uploads"
-        case_dir.mkdir(parents=True, exist_ok=True)
-        destination = case_dir / filename
-        async with aiofiles.open(destination, "wb") as out:
-            while chunk := await file.read(1024 * 64):
-                await out.write(chunk)
+    extracted_tables: list[tuple[str, str, pd.DataFrame]] = []
+    processed_filenames: list[str] = []
+    case_saved_files: list[str] = []
+
+    for up_file in uploaded_files:
+        filename = up_file.filename or "uploaded_dataset"
+        extension = Path(filename).suffix.lower()
+
+        if extension not in {".csv", ".json", ".zip", ".pdf", ".docx"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format '{extension}' for file '{filename}'. Please upload a .csv, .json, or .zip file.",
+            )
+
+        # Handle document uploads (PDF/DOCX) for case reviews
+        if extension in {".pdf", ".docx"}:
+            case_dir = DATA_DIR / "case_uploads"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            destination = case_dir / filename
+            async with aiofiles.open(destination, "wb") as out:
+                while chunk := await up_file.read(1024 * 64):
+                    await out.write(chunk)
+            case_saved_files.append(filename)
+            processed_filenames.append(filename)
+            continue
+
+        contents = await up_file.read()
+        if not contents:
+            continue
+
+        processed_filenames.append(filename)
+
+        try:
+            if extension == ".zip":
+                # Extract multiple datasets from zip archive
+                with zipfile.ZipFile(io.BytesIO(contents)) as z:
+                    for z_name in z.namelist():
+                        z_ext = Path(z_name).suffix.lower()
+                        if z_ext in {".csv", ".json"} and not z_name.startswith("__MACOSX"):
+                            raw_data = z.read(z_name)
+                            if z_ext == ".csv":
+                                df = pd.read_csv(io.BytesIO(raw_data))
+                            else:
+                                df = pd.read_json(io.BytesIO(raw_data))
+                            if not df.empty:
+                                dtype = _detect_dataset_type(df, z_name)
+                                extracted_tables.append((dtype, z_name, df))
+            elif extension == ".csv":
+                df = pd.read_csv(io.BytesIO(contents))
+                if not df.empty:
+                    dtype = _detect_dataset_type(df, filename)
+                    extracted_tables.append((dtype, filename, df))
+            elif extension == ".json":
+                df = pd.read_json(io.BytesIO(contents))
+                if not df.empty:
+                    dtype = _detect_dataset_type(df, filename)
+                    extracted_tables.append((dtype, filename, df))
+        except Exception as parse_exc:
+            logger.error("Failed to parse uploaded %s file '%s': %s", extension, filename, parse_exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to parse {extension.upper()} file '{filename}': {str(parse_exc)}",
+            )
+
+    if not extracted_tables and case_saved_files:
         return {
             "status": "success",
-            "message": f"{filename} uploaded. Case evidence is ready for local review.",
-            "filename": filename,
-            "saved_to": str(destination),
+            "message": f"{len(case_saved_files)} case document(s) uploaded for local review: {', '.join(case_saved_files)}.",
+            "filename": ", ".join(case_saved_files),
+            "files_processed": case_saved_files,
             "records_ingested": 0,
             "total_records": 0,
         }
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
-
-    extracted_tables: list[tuple[str, str, pd.DataFrame]] = []
-
-    try:
-        if extension == ".zip":
-            # Extract multiple datasets from zip archive
-            with zipfile.ZipFile(io.BytesIO(contents)) as z:
-                for z_name in z.namelist():
-                    z_ext = Path(z_name).suffix.lower()
-                    if z_ext in {".csv", ".json"} and not z_name.startswith("__MACOSX"):
-                        raw_data = z.read(z_name)
-                        if z_ext == ".csv":
-                            df = pd.read_csv(io.BytesIO(raw_data))
-                        else:
-                            df = pd.read_json(io.BytesIO(raw_data))
-                        if not df.empty:
-                            dtype = _detect_dataset_type(df, z_name)
-                            extracted_tables.append((dtype, z_name, df))
-        elif extension == ".csv":
-            df = pd.read_csv(io.BytesIO(contents))
-            if not df.empty:
-                dtype = _detect_dataset_type(df, filename)
-                extracted_tables.append((dtype, filename, df))
-        elif extension == ".json":
-            df = pd.read_json(io.BytesIO(contents))
-            if not df.empty:
-                dtype = _detect_dataset_type(df, filename)
-                extracted_tables.append((dtype, filename, df))
-    except Exception as parse_exc:
-        logger.error("Failed to parse uploaded %s file: %s", extension, parse_exc)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to parse {extension.upper()} file: {str(parse_exc)}",
-        )
-
     if not extracted_tables:
-        raise HTTPException(status_code=400, detail="The uploaded file contains no data rows or recognizable tables.")
+        raise HTTPException(status_code=400, detail="The uploaded file(s) contain no data rows or recognizable tables.")
 
     # ── Dependency Check & Schema Validation ──
     for dtype, tbl_name, tdf in extracted_tables:
@@ -1073,8 +1119,8 @@ async def upload_file(
     # ── State Invalidation 2: Targeted table wiping based on uploaded datasets ──
     try:
         uploaded_types = {dt for dt, _, _ in extracted_tables}
-        # If uploading new alerts (soc_alerts) or a multi-table bundle/zip, wipe previous alerts & child tables
-        if "soc_alerts" in uploaded_types or extension == ".zip":
+        # If uploading new alerts (soc_alerts) or any multi-table bundle/zip, wipe previous alerts & child tables
+        if "soc_alerts" in uploaded_types or any(Path(f).suffix.lower() == ".zip" for f in processed_filenames):
             db.query(AlertClosures).delete()
             db.query(EscalationRecords).delete()
             db.query(InvestigationWorkflows).delete()
@@ -1125,12 +1171,14 @@ async def upload_file(
     primary_dataset = extracted_tables[0][0] if len(extracted_tables) == 1 else "relational_evidence_bundle"
     ml_caps = _report_cache.get("summary", {}).get("ml_capabilities", {})
     disabled_flags = _report_cache.get("summary", {}).get("disabled_flags", [])
+    display_filename = ", ".join(processed_filenames) if len(processed_filenames) > 1 else (processed_filenames[0] if processed_filenames else "uploaded_datasets")
 
     return {
         "status": "success",
         "dataset_type": primary_dataset,
-        "message": f"Hierarchical ingestion complete: {total_records} records ingested across tables in parent-first order.",
-        "filename": filename,
+        "message": f"Hierarchical ingestion complete: {total_records} records ingested across {len(extracted_tables)} dataset table(s) from {len(processed_filenames)} file(s).",
+        "filename": display_filename,
+        "files_processed": processed_filenames,
         "summary": summary_results,
         "records_ingested": total_records,
         "total_records": total_records,
